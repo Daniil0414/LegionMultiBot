@@ -20,13 +20,13 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import subprocess
           import zipfile
-          files = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          files = ['app_container.py', 'browser_lifecycle.py', 'browser_profiles.py', 'chrome_mobile.py', 'chrome_transport.py', 'happ_memory.py', 'proxy_manager.py', 'proxy_network.py', 'userscript_privacy.py', 'userscripts.py', 'vpn_dispatcher.py', 'vpn_runtime.py', 'userscript_privacy.js', 'userscript_runtime.js', 'userscript_transform.js', 'vendor/acorn.js', 'vendor/acorn.LICENSE', 'Запустить_Мультибот.bat', 'README.md']
+          assert [name for name in files if name.endswith('.bat')] == ['Запустить_Мультибот.bat']
           with zipfile.ZipFile('LegionMultiBot-windows.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
               for name in files:
-                  if not name or name.startswith('.github/') or name in ('.gitignore', '.gitattributes', 'RELEASE_NOTES.md'):
-                      continue
+                  if not Path(name).is_file():
+                      raise FileNotFoundError(name)
                   archive.write(name, 'LegionMultiBot/' + name)
           PY
           sha256sum LegionMultiBot-windows.zip > SHA256SUMS.txt
