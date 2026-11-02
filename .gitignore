@@ -1,0 +1,41 @@
+# User data and local state
+accounts.json
+userscript_config.json
+userscript_config.json.lock
+launcher_config.json
+vpn_config.json
+proxies.txt
+.vpn_runtime/
+profiles/
+Bots/
+User Data/
+*.log
+*.lock
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Web Data
+**/History
+**/Preferences
+**/Local State
+**/userscript-private.json
+**/.network-isolation.json
+**/.network-slots.json
+**/.legion-session.json
+# Development and build output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+dist/
+*.zip
+SHA256SUMS.txt
+.DS_Store
+Thumbs.db
