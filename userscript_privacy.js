@@ -35,6 +35,17 @@
   const listen = EventTarget.prototype.addEventListener.bind(window);
   const unlisten = EventTarget.prototype.removeEventListener.bind(window);
   const EventClass = CustomEvent;
+  let mineControl = null;
+  if (config.mineCommand && config.mineReply) listen(config.mineCommand, event => {
+    if (!mineControl || typeof event.detail !== 'string' || event.detail.length > 1024) return;
+    let packet;
+    try { packet = parse(event.detail); } catch (_) { return; }
+    if (!packet || typeof packet.id !== 'string' || !['start', 'pause'].includes(packet.action)) return;
+    let result;
+    try { result = {ok: true, ...mineControl(packet.action)}; }
+    catch (error) { result = {ok: false, error: error.message === 'not_confirmed' ? 'not_confirmed' : 'unavailable'}; }
+    dispatch(new EventClass(config.mineReply, {detail: stringify({id: packet.id, ...result})}));
+  });
   const later = setTimeout.bind(window), cancel = clearTimeout.bind(window);
   const nativeStorage = window.localStorage;
   const get = Storage.prototype.getItem.bind(nativeStorage);
@@ -126,6 +137,7 @@
       return stateGet(object);
     };
     return {storage, state, ghostClass, title: originalTitle,
+      registerMineControl(handler) { mineControl = handler; },
       get activeElement() { return shadow?.activeElement || document.activeElement; },
       init(object, privateValues) { assign(state(object), privateValues); return object; },
       query(method, selector) {

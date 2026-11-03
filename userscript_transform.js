@@ -10,7 +10,7 @@ const roots = new Set(['G', 'window', 'unsafeWindow', 'globalThis']);
 function transform(source) {
   const tree = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   const name = '_' + crypto.randomBytes(12).toString('hex');
-  const stats = { globals: 0, objectFlags: 0, uiAccesses: 0 };
+  const stats = { globals: 0, objectFlags: 0, uiAccesses: 0, mineControls: 0 };
   const propertyName = node => node.computed ?
     (node.property.type === 'Literal' && typeof node.property.value === 'string' ? node.property.value : '') :
     node.property.name;
@@ -20,7 +20,33 @@ function transform(source) {
   const isContainer = node => node.type === 'MemberExpression' && isDocument(node.object) &&
     ['body', 'head', 'documentElement'].includes(propertyName(node)) ||
     node.type === 'LogicalExpression' && isContainer(node.left) && isContainer(node.right);
+  const calls = (block, method) => block?.type === 'BlockStatement' && block.body.length === 1 &&
+    block.body[0].type === 'ExpressionStatement' && block.body[0].expression.type === 'CallExpression' &&
+    block.body[0].expression.callee.type === 'Identifier' && block.body[0].expression.callee.name === method &&
+    block.body[0].expression.arguments.length === 0;
+  function isMineToggle(node) {
+    const assignment = node.expression, target = assignment?.left, handler = assignment?.right;
+    const branch = handler?.body?.body?.[0];
+    return node.type === 'ExpressionStatement' && assignment?.type === 'AssignmentExpression' &&
+      assignment.operator === '=' && target.type === 'MemberExpression' &&
+      target.object.type === 'Identifier' && target.object.name === 'btn' && propertyName(target) === 'onclick' &&
+      handler.type === 'ArrowFunctionExpression' && handler.params.length === 0 &&
+      handler.body.type === 'BlockStatement' && handler.body.body.length === 1 &&
+      branch?.type === 'IfStatement' && branch.test.type === 'Identifier' && branch.test.name === 'isPaused' &&
+      calls(branch.consequent, 'startBot') && calls(branch.alternate, 'pauseBot');
+  }
   function emit(node) {
+    if (isMineToggle(node)) {
+      stats.mineControls++;
+      return `${emit(node.expression)};\n${name}.registerMineControl(action => {
+        if (${name}.state(window).__mineBotRunning !== true || typeof isPaused !== 'boolean' ||
+            !btn.isConnected || btn.disabled || typeof btn.onclick !== 'function') throw new Error('unavailable');
+        const paused = action === 'pause', previous = isPaused;
+        if (isPaused !== paused) btn.click();
+        if (isPaused !== paused) throw new Error('not_confirmed');
+        return {state: isPaused ? 'paused' : 'running', changed: previous !== isPaused};
+      });`;
+    }
     if (node.type === 'Literal' && node.value === 'lg-ghost-mode') return `${name}.ghostClass`;
     if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
       const method = propertyName(node.callee), object = node.callee.object;

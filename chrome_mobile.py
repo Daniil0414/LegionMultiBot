@@ -176,8 +176,9 @@ class MobileBrowser:
         token = secrets.token_hex(24)
         self._private_store = PrivateScriptStore(storage_path) if storage_path else None
         self._private_config = {name: token + '-' + name for name in
-                                ('binding', 'receiver', 'request', 'reply', 'ready', 'world')}
+                                ('binding', 'receiver', 'request', 'reply', 'ready', 'world', 'mineCommand', 'mineReply')}
         self._private_sessions = set()
+        self._headless = False
 
     def _prepare_private_world(self, session, frame):
         if session not in self._private_sessions or not frame.get('url', '').startswith(('http://', 'https://')):
@@ -191,6 +192,40 @@ class MobileBrowser:
             dict(name=self._private_config['binding'], executionContextId=context), session)
         self.connection.call('Runtime.evaluate',
             dict(expression=bridge_source(self._private_config), contextId=context), session)
+
+    def command_mine(self, action):
+        from userscript_privacy import mine_command_source
+        expression = mine_command_source(self._private_config, action)
+        if not self._userscript or not self._userscript.get('mine_control'):
+            return [dict(ok=False, error='unsupported')]
+        with self._condition:
+            targets = [(target, data['session']) for target, data in self._targets.items()
+                       if data['type'] == 'page']
+        # Detach notifications may lag behind a just-closed bootstrap tab.
+        live = {item['targetId'] for item in self.connection.call('Target.getTargets')['targetInfos']
+                if item['type'] == 'page'}
+        targets = [(target, session) for target, session in targets if target in live]
+        results = []
+        for target, session in targets:
+            try:
+                frame = self.connection.call('Page.getFrameTree', {}, session)['frameTree']['frame']
+                if not frame.get('url', '').startswith(('http://', 'https://')):
+                    results.append(dict(target=target, ok=False, error='not_ready'))
+                    continue
+                context = self.connection.call('Page.createIsolatedWorld', dict(
+                    frameId=frame['id'], worldName=self._private_config['world']), session)['executionContextId']
+                response = self.connection.call('Runtime.evaluate', dict(expression=expression,
+                    contextId=context, awaitPromise=True, returnByValue=True), session)
+                value = response.get('result', {}).get('value')
+                expected = 'running' if action == 'start' else 'paused'
+                if response.get('exceptionDetails') or not isinstance(value, dict):
+                    value = dict(ok=False, error='unavailable')
+                elif value.get('ok') and value.get('state') != expected:
+                    value = dict(ok=False, error='not_confirmed')
+                results.append(dict(value, target=target))
+            except (ProtocolError, KeyError):
+                results.append(dict(target=target, ok=False, error='unavailable'))
+        return results or [dict(ok=False, error='unavailable')]
 
     def _private_binding(self, event):
         params = event.get('params', {})
@@ -262,6 +297,7 @@ class MobileBrowser:
                         self.connection.call('Page.reload', {}, session)
 
     def start(self, arguments):
+        self._headless = any(argument.startswith('--headless') for argument in arguments)
         self.app_mode = any(argument.startswith('--app=') for argument in arguments)
         if not self.emulate_mobile and self.app_mode:
             # A data-URL app shell leaves stale/zero outer-window metrics after
@@ -442,24 +478,35 @@ class MobileBrowser:
     def navigate(self, url, new_window=False, desktop=False, target_id=None):
         pages = self.connection.call('Target.getTargets')['targetInfos']
         if not self.emulate_mobile and (target_id is None or new_window):
-            # Hold only document responses while the new native window gets its
-            # userscript hooks. Do not edit requests, headers or response bodies.
+            # Headless Chrome has no native-window metrics to preserve. Configure
+            # its blank page before navigating; browser-wide Fetch interception
+            # can strand headless startup on hosted Windows runners.
             with self._open_lock:
                 gated, target = False, None
                 try:
-                    if self._userscript:
-                        self.connection.call('Fetch.enable', dict(patterns=[dict(
-                            urlPattern='*', resourceType='Document', requestStage='Response')]))
-                        gated = True
-                    target = self.connection.call('Target.createTarget', dict(url=url, newWindow=True))['targetId']
-                    self.wait_target(target)
+                    if self._headless:
+                        target = self.connection.call('Target.createTarget', dict(url='about:blank'))['targetId']
+                        session = self.wait_target(target)
+                        self._navigation_sessions.add(session)
+                        try:
+                            result = self.connection.call('Page.navigate', dict(url=url), session)
+                            if result.get('errorText'):
+                                raise ProtocolError('Page.navigate: ' + result['errorText'])
+                        finally:
+                            self._navigation_sessions.discard(session)
+                    else:
+                        if self._userscript:
+                            self.connection.call('Fetch.enable', dict(patterns=[dict(
+                                urlPattern='*', resourceType='Document', requestStage='Response')]))
+                            gated = True
+                        target = self.connection.call('Target.createTarget', dict(url=url, newWindow=True))['targetId']
+                        self.wait_target(target)
                 except BaseException:
                     if target:
                         self._close_extra_target(target)
                     raise
                 finally:
                     if gated:
-                        # Disabling the domain releases its pending responses.
                         self.connection.call('Fetch.disable')
             first_window = self.app_mode and self.app_target is None
             if first_window:

@@ -47,7 +47,8 @@ def check():
 
         def do_GET(self):
             requests_received.append(self.path)
-            body = b'<!doctype html><title>Legion portable check</title><p id="ready">ready</p>'
+            body = (b'<!doctype html><title>Legion portable check</title><p id="ready">ready</p>'
+                    b'<script>document.body.dataset.beforePage=String(window.portableBeforePage===true)</script>')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
@@ -61,6 +62,10 @@ def check():
         assert compiled and compiled['private_state']
         with patch('userscripts.download_script', side_effect=OSError('offline portable check')):
             assert manager.for_launch()['digest'] == compiled['digest']
+        fixture = ('// ==UserScript==\n// @match http://127.0.0.1/*\n'
+                   '// @run-at document-start\n// ==/UserScript==\nwindow.portableBeforePage=true;')
+        with patch('userscripts.download_script', return_value=fixture):
+            manager.install('https://raw.githubusercontent.com/example/portable-check/main/fixture.user.js')
         server = ThreadingHTTPServer(('127.0.0.1', 0), Page)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         profiles = BrowserProfiles(root=directory / 'profiles', userscripts=manager, allow_direct=True)
@@ -81,9 +86,10 @@ def check():
                     try:
                         session = browser.wait_target(target)
                         value = browser.connection.call('Runtime.evaluate', dict(
-                            expression="document.getElementById('ready')?.textContent", returnByValue=True), session)
+                            expression="document.getElementById('ready')?.textContent + ':' + document.body?.dataset.beforePage",
+                            returnByValue=True), session)
                         last_value = value
-                        if value.get('result', {}).get('value') == 'ready':
+                        if value.get('result', {}).get('value') == 'ready:true':
                             ready = True
                             break
                     except ProtocolError as exc:
@@ -99,4 +105,4 @@ def check():
     return {'ok': True, 'tk': True, 'app_version': APP_VERSION, 'updater_prompt': True, 'node': node.stdout.strip(),
             'xray': xray.stdout.splitlines()[0], 'bundled_browser': True,
             'script_auto_install': True, 'offline_script_cache': True,
-            'local_browser_page': True, 'uses_system_python_or_node': False}
+            'local_browser_page': True, 'document_start_script': True, 'uses_system_python_or_node': False}

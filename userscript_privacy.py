@@ -105,6 +105,31 @@ class PrivateScriptStore:
             return {'values': values} if action == 'load' else {}
 
 
+def mine_command_source(config, action):
+    """Request one idempotent click in the supported script, with an acknowledgement."""
+    if action not in ('start', 'pause'):
+        raise ValueError('Unknown mine command')
+    import secrets
+    packet = dict(id=secrets.token_hex(16), action=action)
+    return r'''new Promise(resolve => {
+      const c = CONFIG, packet = PACKET;
+      let timer;
+      const finish = result => {
+        clearTimeout(timer);
+        window.removeEventListener(c.mineReply, reply);
+        resolve(result);
+      };
+      const reply = event => {
+        let result;
+        try { result = JSON.parse(event.detail); } catch (_) { return; }
+        if (result && result.id === packet.id) finish(result);
+      };
+      window.addEventListener(c.mineReply, reply);
+      timer = setTimeout(() => finish({ok:false, error:'not_ready'}), 1000);
+      window.dispatchEvent(new CustomEvent(c.mineCommand, {detail:JSON.stringify(packet)}));
+    })'''.replace('CONFIG', json.dumps(config), 1).replace('PACKET', json.dumps(packet), 1)
+
+
 def bridge_source(config):
     """This script runs only in a named isolated world, never the page world."""
     return r'''(() => {

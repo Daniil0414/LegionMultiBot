@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { transform } = require('../userscript_transform');
 
-function execute(source) {
+function execute(source, extraPrivacy = {}) {
   const states = new WeakMap();
   const state = object => {
     if (object == null) return object;
@@ -15,7 +15,7 @@ function execute(source) {
   };
   const context = vm.createContext({ privacy: {state,
     init: (object, values) => { Object.assign(state(object), values); return object; },
-    storage: { getItem: () => 'private-setting' } } });
+    storage: { getItem: () => 'private-setting' }, ...extraPrivacy } });
   context.window = context;
   vm.runInContext(transform(source).code, context);
   return context;
@@ -55,4 +55,34 @@ test('adaptation parses the complete checked-in bot', {
   const result = transform(source);
   assert.ok(result.stats.globals > 300);
   assert.ok(result.stats.objectFlags > 15);
+  assert.equal(result.stats.mineControls, 1);
+});
+
+test('mine control clicks the actual toggle only when a state change is needed', () => {
+  let command;
+  const page = execute(`(() => {
+    window.__mineBotRunning = true;
+    let isPaused = true, clicks = 0;
+    const btn = {isConnected:true, click() {clicks++; this.onclick();}};
+    function startBot() { isPaused = false; }
+    function pauseBot() { isPaused = true; }
+    btn.onclick = () => { if (isPaused) { startBot(); } else { pauseBot(); } };
+    window.readFixture = () => ({isPaused, clicks});
+    window.closeFixture = () => { window.__mineBotRunning = false; };
+  })();`, {registerMineControl: handler => { command = handler; }});
+  assert.equal(command('start').state, 'running');
+  assert.equal(command('start').changed, false);
+  assert.equal(page.readFixture().clicks, 1);
+  assert.equal(command('pause').state, 'paused');
+  assert.equal(command('pause').changed, false);
+  assert.equal(page.readFixture().clicks, 2);
+  page.closeFixture();
+  assert.throws(() => command('start'), /unavailable/);
+  assert.equal(page.readFixture().clicks, 2);
+});
+
+test('a changed toggle format keeps the script intact and leaves remote control unavailable', () => {
+  const result = transform('window.__mineBotRunning = true; const btn = {}; btn.onclick = () => startBot();');
+  assert.equal(result.stats.mineControls, 0);
+  assert.ok(result.code.includes('btn.onclick = () => startBot()'));
 });

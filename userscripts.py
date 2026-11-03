@@ -104,7 +104,8 @@ def compile_script(source):
     bootstrap = bootstrap.replace('/*__SOURCE__*/', adapted['code'] if adapted else source, 1)
     return dict(bootstrap=bootstrap, digest=settings['digest'],
                 name=meta.get('name', ['Скрипт бота'])[-1], version=meta.get('version', [''])[-1],
-                private_state=private_state, privacy_changes=adapted['stats'] if adapted else {})
+                private_state=private_state, privacy_changes=adapted['stats'] if adapted else {},
+                mine_control=bool(adapted and adapted['stats'].get('mineControls') == 1))
 
 
 class UserscriptManager:
@@ -181,7 +182,9 @@ class UserscriptManager:
             return scripts[0][1]
         digest = hashlib.sha256(json.dumps([(key, script['digest']) for key, script in scripts]).encode('utf-8')).hexdigest()
         return dict(bootstrap=';\n'.join(script['bootstrap'] for _, script in scripts), digest=digest,
-                    private_state=any(script.get('private_state') for _, script in scripts))
+                    private_state=any(script.get('private_state') for _, script in scripts),
+                    mine_control=sum(script.get('privacy_changes', {}).get('mineControls', 0)
+                                     for _, script in scripts) == 1)
 
     def current(self):
         return self._bundle(self._read())

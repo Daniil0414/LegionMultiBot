@@ -8,6 +8,7 @@ import time
 import urllib.parse
 import json
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 from userscripts import UserscriptManager
 from vpn_runtime import atomic_json, process_identity, runtime_lock
 from chrome_mobile import MobileBrowser, device_for_profile
@@ -57,6 +58,9 @@ class BrowserProfiles:
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._controllers = {}
+        self._mine_command_generation = 0
+        self._mine_requested_at = 0
+        self._mine_command_locks = {}
         self.userscripts = userscripts if userscripts is not None else UserscriptManager()
         self._state_lock = threading.Lock()
         self._generation = 0
@@ -108,6 +112,38 @@ class BrowserProfiles:
             script = self.userscripts.disable(script_id)
             self.apply_userscript(script)
             return self.userscripts.status()
+
+    def command_mine_all(self, action, requested_at=None):
+        """Address all open profiles; a newer command supersedes queued older work."""
+        if action not in ('start', 'pause'):
+            raise ValueError('Unknown mine command')
+        requested_at = time.monotonic_ns() if requested_at is None else requested_at
+        with self._lock:
+            if requested_at <= self._mine_requested_at:
+                return []
+            self._mine_requested_at = requested_at
+            self._mine_command_generation += 1
+            generation = self._mine_command_generation
+            controllers = list(self._controllers.items())
+            locks = {key: self._mine_command_locks.setdefault(key, threading.Lock()) for key, _ in controllers}
+
+        def send(item):
+            key, controller = item
+            with locks[key]:
+                with self._lock:
+                    if generation != self._mine_command_generation:
+                        return [dict(key=key, ok=False, error='superseded')]
+                    if self._controllers.get(key) is not controller or controller.connection.closed.is_set():
+                        return [dict(key=key, ok=False, error='unavailable')]
+                try:
+                    return [dict(result, key=key) for result in controller.command_mine(action)]
+                except Exception:
+                    return [dict(key=key, ok=False, error='unavailable')]
+
+        if not controllers:
+            return []
+        with ThreadPoolExecutor(max_workers=min(8, len(controllers))) as pool:
+            return [result for batch in pool.map(send, controllers) for result in batch]
 
     def navigate_app(self, key, url, generation=None):
         """Navigate the existing app window without relaunching or changing its route."""

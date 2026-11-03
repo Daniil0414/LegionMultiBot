@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, HAPP_IMPORT_FAILURE, subscription_url as normalize_subscription_url
 from browser_profiles import BrowserProfiles, LaunchCancelled
+from mine_control_ui import MineControlOverlay
 from browser_focus import DockedBrowserFocus
 from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySelectionCancelled
 from proxy_network import fetch_proxy_ip
@@ -384,6 +385,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self.browser_profiles = BrowserProfiles(allow_direct=not self.use_vpn)
         self._closing_browsers = False
         self._shutting_down = False
+        self._mine_overlay = None
         self.protocol('WM_DELETE_WINDOW', self.shutdown_app)
         self.browser_sessions = {}
         self._session_check_busy = False
@@ -738,6 +740,13 @@ class HighQualityMultiBoxerApp(tk.Tk):
             activebackground="#6b21a8", activeforeground="#ffffff", relief="flat", padx=6, pady=1, cursor="hand2"
         )
         self.btn_userscript.pack(side="left", padx=2)
+
+        self.btn_swarm = tk.Button(
+            self.header_bar, text="⛏ Рой", command=self.open_mine_control,
+            font=("Segoe UI", 8, "bold"), bg="#14532d", fg="#bbf7d0",
+            activebackground="#166534", activeforeground="#ffffff", relief="flat", padx=6, pady=1, cursor="hand2"
+        )
+        self.btn_swarm.pack(side="left", padx=2)
 
         # Separator
         tk.Label(self.header_bar, text="|", bg="#0d1424", fg="#334155").pack(side="left", padx=2)
@@ -1427,6 +1436,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self._shutting_down:
             return
         self._shutting_down = True
+        overlay = getattr(self, '_mine_overlay', None)
+        if overlay is not None:
+            overlay.withdraw()
         self._browser_focus.close()
         if self._status_spinner_timer is not None:
             self.after_cancel(self._status_spinner_timer)
@@ -2130,6 +2142,13 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+
+    def open_mine_control(self):
+        if self._mine_overlay is None or not self._mine_overlay.winfo_exists():
+            self._mine_overlay = MineControlOverlay(self, self.browser_profiles,
+                account_names=lambda: {p['key']: p.get('gaia') or p.get('name') or p['key']
+                                       for p in self.bot_profiles})
+        self._mine_overlay.show()
 
     def open_userscript_dialog(self):
         try:
