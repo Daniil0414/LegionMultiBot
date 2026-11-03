@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import urllib.request
 import zipfile
 
@@ -137,4 +138,9 @@ if __name__ == '__main__':
     parser.add_argument('--cache', type=Path, default=ROOT / 'build-cache')
     parser.add_argument('--output', type=Path, default=ROOT / 'dist')
     arguments = parser.parse_args()
-    build(arguments.cache.resolve(), arguments.output.resolve())
+    try:
+        build(arguments.cache.resolve(), arguments.output.resolve())
+    except Exception:
+        details = traceback.format_exc().replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+        print('::error title=Portable build failed::' + details, flush=True)
+        raise
