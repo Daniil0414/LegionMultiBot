@@ -2,6 +2,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import urllib.request
+import urllib.error
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +25,17 @@ FORBIDDEN = {'accounts.json', 'userscript_config.json', 'launcher_config.json',
 def fetch(url, target):
     target.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={'User-Agent': 'LegionMultiBot-Portable-Builder'})
-    with urllib.request.urlopen(request, timeout=90) as response, target.open('wb') as output:
-        shutil.copyfileobj(response, output, length=1024 * 1024)
+    partial = target.with_name(target.name + '.part')
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response, partial.open('wb') as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
+            partial.replace(target)
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def download(component, cache):

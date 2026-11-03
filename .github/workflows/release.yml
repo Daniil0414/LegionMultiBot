@@ -2,8 +2,6 @@ name: Publish standalone Windows release
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
 
