@@ -9,13 +9,50 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from browser_lifecycle import BrowserJob, resume_browser
 from browser_profiles import BrowserProfiles
-from chrome_mobile import MobileBrowser
+from chrome_mobile import MobileBrowser, ProtocolError
 from userscripts import UserscriptManager
 from vpn_runtime import atomic_json
+
+
+class NavigationRetryTests(unittest.TestCase):
+    def browser(self, results):
+        browser = MobileBrowser({}, emulate_mobile=False)
+        browser._headless = True
+        browser.connection = Mock()
+        browser.wait_target = Mock(return_value='session')
+        browser._close_extra_target = Mock()
+        results = iter(results)
+
+        def call(method, params=None, session=None):
+            if method == 'Target.getTargets':
+                return {'targetInfos': []}
+            if method == 'Target.createTarget':
+                return {'targetId': 'native'}
+            if method == 'Page.navigate':
+                return next(results)
+            return {}
+
+        browser.connection.call.side_effect = call
+        return browser
+
+    def test_aborted_first_headless_load_retries_in_the_same_configured_target(self):
+        browser = self.browser([{'errorText': 'net::ERR_ABORTED'}, {}])
+        self.assertEqual(browser.navigate('https://example.test/'), 'native')
+        calls = browser.connection.call.call_args_list
+        self.assertEqual(sum(call.args[0] == 'Target.createTarget' for call in calls), 1)
+        self.assertEqual(sum(call.args[0] == 'Page.navigate' for call in calls), 2)
+        browser.connection.call.assert_any_call('Page.stopLoading', {}, 'session')
+        browser._close_extra_target.assert_not_called()
+
+    def test_repeated_navigation_failure_closes_only_the_failed_target(self):
+        browser = self.browser([{'errorText': 'net::ERR_ABORTED'}] * 2)
+        with self.assertRaisesRegex(ProtocolError, 'Page.navigate: net::ERR_ABORTED'):
+            browser.navigate('https://example.test/')
+        browser._close_extra_target.assert_called_once_with('native')
 
 
 PROBE = r'''(() => {

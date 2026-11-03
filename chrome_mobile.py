@@ -490,6 +490,9 @@ class MobileBrowser:
                         self._navigation_sessions.add(session)
                         try:
                             result = self.connection.call('Page.navigate', dict(url=url), session)
+                            if result.get('errorText') == 'net::ERR_ABORTED':
+                                self.connection.call('Page.stopLoading', {}, session)
+                                result = self.connection.call('Page.navigate', dict(url=url), session)
                             if result.get('errorText'):
                                 raise ProtocolError('Page.navigate: ' + result['errorText'])
                         finally:
