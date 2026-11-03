@@ -306,15 +306,29 @@ function Assert-Target([string]$relative) {
     }
     return $path
 }
+function Get-PayloadFiles([string]$directoryPath, [string]$prefix) {
+    # Provider recursion and substring offsets are unreliable with Windows 8.3 temp paths.
+    $directory = New-Object IO.DirectoryInfo -ArgumentList $directoryPath
+    foreach ($child in $directory.GetFileSystemInfos()) {
+        if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Update payload is a link.' }
+        $relative = if ($prefix) { Join-Path $prefix $child.Name } else { $child.Name }
+        if ($child.Attributes -band [IO.FileAttributes]::Directory) {
+            Get-PayloadFiles $child.FullName $relative
+        } else {
+            [PSCustomObject]@{ FullName=$child.FullName; RelativePath=$relative }
+        }
+    }
+}
 try {
     $parent = [Diagnostics.Process]::GetProcessById([int]$plan.parent_pid)
     $parent.Handle | Out-Null
     [IO.File]::WriteAllText((Join-Path $work 'ready'), 'ready')
     if (-not $parent.WaitForExit(180000)) { throw 'Application did not close in time. No files were changed.' }
     $parentExited = $true
-    $files = @(Get-ChildItem -LiteralPath $plan.payload -Recurse -File -Force)
+    $files = @(Get-PayloadFiles $plan.payload '')
+    if (-not $files.Count) { throw 'Update payload contains no program files.' }
     foreach ($file in $files) {
-        $relative = $file.FullName.Substring($plan.payload.Length).TrimStart('\')
+        $relative = $file.RelativePath
         $destination = Assert-Target $relative
         $backup = Join-Path (Join-Path $work 'backup') $relative
         $existed = Test-Path -LiteralPath $destination

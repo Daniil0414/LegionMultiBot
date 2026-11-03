@@ -19,7 +19,10 @@ class ProfileLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='legion-lifecycle-')
         self.addCleanup(self.temp.cleanup)
-        self.profiles = bp.BrowserProfiles(root=self.temp.name)
+        scripts = Mock()
+        scripts.for_launch.return_value = None
+        scripts.status.return_value = {}
+        self.profiles = bp.BrowserProfiles(root=self.temp.name, userscripts=scripts)
         self.addCleanup(self.profiles.shutdown)
         self.directory = self.profiles.prepare('account').resolve()
         self.executable = os.path.normcase(os.path.abspath('chrome.exe'))

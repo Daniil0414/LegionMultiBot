@@ -200,7 +200,7 @@ class ArchiveTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows installer')
 class WindowsInstallerTests(unittest.TestCase):
-    def install(self, failure=False):
+    def install(self, failure=False, short_path=False, trailing_separator=False):
         with tempfile.TemporaryDirectory(prefix='legion-installer-test-') as temp:
             root = Path(temp)
             target, payload, work = root / 'папка приложения', root / 'payload', root / 'helper'
@@ -220,7 +220,16 @@ class WindowsInstallerTests(unittest.TestCase):
                 'import time; from pathlib import Path\n'
                 f'while not Path({str(stop)!r}).exists(): time.sleep(0.05)'])
             self.addCleanup(lambda: parent.poll() is None and parent.kill())
-            plan = dict(parent_pid=parent.pid, payload=str(payload), target=str(target), notify=False,
+            payload_path = str(payload)
+            if short_path:
+                import ctypes
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = ctypes.windll.kernel32.GetShortPathNameW(payload_path, buffer, len(buffer))
+                self.assertGreater(length, 0)
+                payload_path = buffer.value
+            if trailing_separator:
+                payload_path += os.sep
+            plan = dict(parent_pid=parent.pid, payload=payload_path, target=str(target), notify=False,
                         restart_exe=sys.executable, restart_arguments=subprocess.list2cmdline([
                             '-c', 'from pathlib import Path; Path(' + repr(str(marker)) + ').write_text("yes")']))
             (work / 'plan.json').write_text(json.dumps(plan), encoding='utf-8')
@@ -255,6 +264,12 @@ class WindowsInstallerTests(unittest.TestCase):
 
     def test_failed_install_restores_previous_files_and_restarts_old_version(self):
         self.install(failure=True)
+
+    def test_install_accepts_windows_short_temp_paths(self):
+        self.install(short_path=True)
+
+    def test_install_accepts_a_trailing_payload_separator(self):
+        self.install(trailing_separator=True)
 
 
 @unittest.skipUnless(os.name == 'nt', 'Tk startup prompt')
