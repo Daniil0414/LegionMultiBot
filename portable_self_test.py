@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import os
+import json
 import subprocess
 import tempfile
 import threading
@@ -38,11 +39,14 @@ def check():
     xray = subprocess.run([bundled_xray(), 'version'], capture_output=True, text=True, timeout=20, creationflags=0x08000000)
     assert node.returncode == xray.returncode == 0
 
+    requests_received = []
+
     class Page(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            requests_received.append(self.path)
             body = b'<!doctype html><title>Legion portable check</title><p id="ready">ready</p>'
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -66,7 +70,9 @@ def check():
                     '--headless=new', '--disable-gpu', f'http://127.0.0.1:{server.server_port}/'])
             browser = profiles._controllers['portable-check']
             ready = False
-            for _ in range(100):
+            deadline = time.monotonic() + 60
+            pages, last_value, last_error = [], None, ''
+            while time.monotonic() < deadline:
                 # Startup can replace the initial blank page and its session.
                 pages = browser.connection.call('Target.getTargets')['targetInfos']
                 target = next((page['targetId'] for page in pages if page['type'] == 'page'
@@ -76,13 +82,16 @@ def check():
                         session = browser.wait_target(target)
                         value = browser.connection.call('Runtime.evaluate', dict(
                             expression="document.getElementById('ready')?.textContent", returnByValue=True), session)
+                        last_value = value
                         if value.get('result', {}).get('value') == 'ready':
                             ready = True
                             break
-                    except ProtocolError:
-                        pass
+                    except ProtocolError as exc:
+                        last_error = str(exc)
                 time.sleep(0.1)
-            assert ready, 'Bundled Chromium did not display the local test page'
+            assert ready, 'Bundled Chromium did not display the local test page: ' + json.dumps(dict(
+                targets=pages, evaluation=last_value, error=last_error,
+                configuration_errors=browser._errors, requests=requests_received))
         finally:
             profiles.shutdown()
             server.shutdown()
