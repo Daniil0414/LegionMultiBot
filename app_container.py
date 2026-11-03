@@ -16,7 +16,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, HAPP_IMPORT_FAILURE, subscription_url as normalize_subscription_url
 from browser_profiles import BrowserProfiles, LaunchCancelled
-from mine_control_ui import MineControlOverlay
+from mine_control_ui import MineControlPanel
 from browser_focus import DockedBrowserFocus
 from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySelectionCancelled
 from proxy_network import fetch_proxy_ip
@@ -1438,7 +1438,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self._shutting_down = True
         overlay = getattr(self, '_mine_overlay', None)
         if overlay is not None:
-            overlay.withdraw()
+            overlay.hide()
         self._browser_focus.close()
         if self._status_spinner_timer is not None:
             self.after_cancel(self._status_spinner_timer)
@@ -1855,6 +1855,10 @@ class HighQualityMultiBoxerApp(tk.Tk):
                 else:
                     box.place_forget()
 
+        panel = getattr(self, '_mine_overlay', None)
+        if panel is not None and panel.winfo_ismapped():
+            panel.lift()
+
     def move_to_monitor(self, monitor_idx):
         if monitor_idx >= len(self.monitors):
             return
@@ -2145,7 +2149,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
     def open_mine_control(self):
         if self._mine_overlay is None or not self._mine_overlay.winfo_exists():
-            self._mine_overlay = MineControlOverlay(self, self.browser_profiles,
+            self._mine_overlay = MineControlPanel(self.slots_frame, self.browser_profiles,
                 account_names=lambda: {p['key']: p.get('gaia') or p.get('name') or p['key']
                                        for p in self.bot_profiles})
         self._mine_overlay.show()

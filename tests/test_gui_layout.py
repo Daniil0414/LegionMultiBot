@@ -1,5 +1,6 @@
 """Keep slot navigation and status changes consistent with the docked browser."""
 from contextlib import ExitStack
+import gc
 import os
 from types import SimpleNamespace
 import unittest
@@ -55,6 +56,15 @@ class SlotNavigationTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'nt', 'Windows launcher layout')
 class StatusLayoutTests(unittest.TestCase):
     def setUp(self):
+        gc.collect()
+        enabled = gc.isenabled()
+        gc.disable()
+        def collect_on_main_thread():
+            self.root = None
+            gc.collect()
+            if enabled:
+                gc.enable()
+        self.addCleanup(collect_on_main_thread)
         cls = app.HighQualityMultiBoxerApp
         with ExitStack() as stack:
             for method in ('bind_events', 'update_page_nav', 'apply_clip_children_styles', 'deiconify', 'state', 'after'):

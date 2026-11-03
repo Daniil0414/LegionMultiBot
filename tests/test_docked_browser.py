@@ -1,5 +1,6 @@
 """Exercise actual Win32 embedding with a local page and disposable Chrome profiles."""
 import ctypes
+import gc
 from ctypes import wintypes
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,16 @@ class DockPage(BaseHTTPRequestHandler):
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('LEGION_TEST_CHROME'),
                      'Set LEGION_TEST_CHROME for the native docking test')
 class DockedChromeTests(unittest.TestCase):
+    def setUp(self):
+        gc.collect()
+        enabled = gc.isenabled()
+        gc.disable()
+        def collect_on_main_thread():
+            gc.collect()
+            if enabled:
+                gc.enable()
+        self.addCleanup(collect_on_main_thread)
+
     def test_page_fills_slot_after_resize_reparent_and_dpi_change(self):
         import tkinter as tk
         import app_container as app
@@ -181,6 +192,55 @@ class DockedChromeTests(unittest.TestCase):
                                     root.update()
                                     time.sleep(.2)
                                     ImageGrab.grab(bbox=rect(frame.winfo_id())).save(os.environ['LEGION_DOCK_SCREENSHOT'])
+                        if scale is None:
+                            from mine_control_ui import MineControlPanel
+                            try:
+                                from PIL import ImageGrab, ImageChops
+                            except ImportError:
+                                ImageGrab = None
+                            previous_topmost = root.attributes('-topmost')
+                            panel = MineControlPanel(root, profiles)
+                            try:
+                                baseline = None
+                                if ImageGrab is not None:
+                                    root.attributes('-topmost', True)
+                                    root.update()
+                                    time.sleep(.1)
+                                    baseline = ImageGrab.grab(bbox=rect(root.winfo_id()))
+                                panel.show()
+                                root.update()
+                                self.assertIs(panel.winfo_toplevel(), root)
+                                self.assertTrue(user32.IsChild(root.winfo_id(), panel.winfo_id()))
+                                # Raising the embedded Chrome must not cover a panel
+                                # that belongs to the grid above the slot's container.
+                                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                    app.SWP_NOMOVE | app.SWP_NOSIZE | app.SWP_NOACTIVATE)
+                                root.update()
+                                self.assertEqual(user32.GetTopWindow(root.winfo_id()), panel.winfo_id())
+                                self.assertTrue(aligned())
+                                if baseline is not None:
+                                    old = panel._bounds()
+                                    panel.header.event_generate('<ButtonPress-1>', x=8, y=8)
+                                    panel.header.event_generate('<B1-Motion>',
+                                        rootx=root.winfo_rootx() + 24, rooty=root.winfo_rooty() + 280)
+                                    root.update_idletasks()
+                                    panel.header.event_generate('<ButtonRelease-1>', x=8, y=8)
+                                    self.assertGreaterEqual(panel.winfo_y(), old[3])
+                                    def browser_repainted():
+                                        image = ImageGrab.grab(bbox=rect(root.winfo_id()))
+                                        return ImageChops.difference(baseline.crop(old), image.crop(old)).getbbox() is None
+                                    wait_until(browser_repainted)
+                                if os.environ.get('LEGION_MINE_EMBED_SCREENSHOT'):
+                                    root.update()
+                                    time.sleep(.2)
+                                    ImageGrab.grab(bbox=rect(root.winfo_id())).save(
+                                        os.environ['LEGION_MINE_EMBED_SCREENSHOT'])
+                                panel.hide()
+                                root.update()
+                                self.assertFalse(panel.winfo_ismapped())
+                            finally:
+                                root.attributes('-topmost', previous_topmost)
+                                panel.destroy()
                         session = browser.wait_target(browser.app_target)
                         with ThreadPoolExecutor(max_workers=1) as commands:
                             def evaluate(expression, **options):

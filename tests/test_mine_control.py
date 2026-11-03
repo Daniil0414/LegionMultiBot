@@ -1,5 +1,6 @@
 """All-profile mine commands, cancellation, browser acknowledgements and overlay UI."""
 import json
+import gc
 import os
 from pathlib import Path
 import tempfile
@@ -175,9 +176,91 @@ class BrowserMineTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Native Windows overlay')
 class OverlayMineTests(unittest.TestCase):
+    def setUp(self):
+        gc.collect()
+        enabled = gc.isenabled()
+        gc.disable()
+        def collect_on_main_thread():
+            gc.collect()
+            if enabled:
+                gc.enable()
+        self.addCleanup(collect_on_main_thread)
+
+    def test_drag_repaints_exposed_slots_without_leaving_panel_pixels(self):
+        import tkinter as tk
+        import app_container as app
+        from mine_control_ui import MineControlPanel
+        try:
+            from PIL import ImageGrab, ImageChops
+        except ImportError:
+            self.skipTest('Pillow is required for the screen repaint regression')
+        app.init_windows_dpi_awareness()
+        root = tk.Tk()
+        root.geometry('744x504+30+30')
+        root.attributes('-topmost', True)
+        host = tk.Frame(root, bg='black')
+        host.pack(fill='both', expand=True, padx=12, pady=12)
+        cards = []
+        for index in range(6):
+            box = tk.Frame(host, bg='#090d16')
+            box.place(x=(index % 3) * 240, y=(index // 3) * 240, width=240, height=240)
+            tk.Label(box, text=f'Slot {index + 1}', bg='#131d33', fg='#60a5fa').pack(fill='x')
+            game = tk.Frame(box, bg='black')
+            game.pack(fill='both', expand=True)
+            tk.Label(game, text=f'Account {index + 1}', bg='black', fg='#387599').place(relx=.5, rely=.5, anchor='center')
+            cards.append(dict(box=box, game_area=game))
+        root.update()
+        app.HighQualityMultiBoxerApp.apply_clip_children_styles(SimpleNamespace(
+            update_idletasks=root.update_idletasks, winfo_id=root.winfo_id, slots_frame=host, slot_cards=cards))
+        root.update()
+        def capture():
+            # Capture the actual displayed pixels: PrintWindow forces a fresh
+            # paint and would conceal the stale pixels being tested here.
+            x, y = host.winfo_rootx(), host.winfo_rooty()
+            return ImageGrab.grab(bbox=(x, y, x + host.winfo_width(), y + host.winfo_height()))
+        try:
+            # Let the Windows opening animation finish before comparing pixels.
+            deadline = time.monotonic() + .4
+            while time.monotonic() < deadline:
+                root.update()
+                time.sleep(.01)
+            baseline = capture()
+            if os.environ.get('LEGION_MINE_DRAG_SCREENSHOT'):
+                baseline.save(str(Path(os.environ['LEGION_MINE_DRAG_SCREENSHOT']).with_name('legion-drag-baseline.png')))
+            panel = MineControlPanel(host, SimpleNamespace())
+            panel.show()
+            root.update()
+            panel.header.event_generate('<ButtonPress-1>', x=8, y=8)
+            for x, y in [(80, 40), (160, 90), (250, 150), (350, 210), (120, 250), (20, 30)] * 3:
+                previous = panel.winfo_x(), panel.winfo_y()
+                panel.header.event_generate('<B1-Motion>', rootx=host.winfo_rootx() + x + 8,
+                                            rooty=host.winfo_rooty() + y + 8)
+                # Keep input queued as during a continuous drag. Geometry and
+                # drawing idles run, while general window messages remain busy.
+                root.update_idletasks()
+                self.assertNotEqual((panel.winfo_x(), panel.winfo_y()), previous)
+                time.sleep(.02)
+                actual = capture()
+                px, py = panel.winfo_x(), panel.winfo_y()
+                right, bottom = px + panel.winfo_width(), py + panel.winfo_height()
+                regions = [(0, 0, 720, py), (0, bottom, 720, 480), (0, py, px, bottom), (right, py, 720, bottom)]
+                differences = [region for region in regions if region[2] > region[0] and region[3] > region[1]
+                               and ImageChops.difference(baseline.crop(region), actual.crop(region)).getbbox()]
+                if differences and os.environ.get('LEGION_MINE_DRAG_SCREENSHOT'):
+                    actual.save(os.environ['LEGION_MINE_DRAG_SCREENSHOT'])
+                self.assertEqual(differences, [], f'Pixels outside the panel changed after moving to {(x, y)}')
+            panel.header.event_generate('<ButtonRelease-1>', x=8, y=8)
+            if os.environ.get('LEGION_MINE_DRAG_SCREENSHOT'):
+                capture().save(os.environ['LEGION_MINE_DRAG_SCREENSHOT'])
+            panel.hide()
+            root.update_idletasks()
+            self.assertIsNone(ImageChops.difference(baseline, capture()).getbbox(), 'Hiding the panel left stale pixels')
+        finally:
+            root.destroy()
+
     def test_stop_remains_available_and_old_start_result_cannot_replace_pause_status(self):
         import tkinter as tk
-        from mine_control_ui import MineControlOverlay
+        from mine_control_ui import MineControlPanel
         root = tk.Tk()
         root.geometry('450x330+40+40')
         root.update()
@@ -186,7 +269,7 @@ class OverlayMineTests(unittest.TestCase):
             if action == 'start':
                 release.wait(3)
             return [dict(key='a', ok=True, state='running' if action == 'start' else 'paused')]
-        overlay = MineControlOverlay(root, SimpleNamespace(command_mine_all=command), lambda: {'a': 'Account 1'})
+        overlay = MineControlPanel(root, SimpleNamespace(command_mine_all=command), lambda: {'a': 'Account 1'})
         def settle(predicate):
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
@@ -197,15 +280,27 @@ class OverlayMineTests(unittest.TestCase):
             self.fail('Overlay did not settle')
         try:
             overlay.show()
-            overlay.start_button.invoke()
-            self.assertEqual(str(overlay.stop_button['state']), 'normal')
-            overlay.stop_button.invoke()
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            overlay.toggle_button.invoke()
+            self.assertEqual(str(overlay.toggle_button['state']), 'normal')
+            self.assertEqual(overlay.toggle_button['text'], 'Стоп')
+            overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
             self.assertIn('на паузе: 1 из 1', overlay.status.get())
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
             release.set()
             time.sleep(.05)
             overlay._poll()
             self.assertIn('на паузе: 1 из 1', overlay.status.get())
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            overlay.toggle_button.invoke()
+            settle(lambda: not overlay._busy)
+            self.assertIn('Копание включено: 1 из 1', overlay.status.get())
+            self.assertEqual(overlay.toggle_button['text'], 'Стоп')
+            overlay.toggle_button.invoke()
+            settle(lambda: not overlay._busy)
+            self.assertIn('на паузе: 1 из 1', overlay.status.get())
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
             if os.environ.get('LEGION_MINE_SCREENSHOT'):
                 from PIL import ImageGrab
                 root.update()
@@ -214,13 +309,72 @@ class OverlayMineTests(unittest.TestCase):
                 ImageGrab.grab(bbox=(x, y, x + overlay.winfo_width(), y + overlay.winfo_height())).save(
                     os.environ['LEGION_MINE_SCREENSHOT'])
             overlay.profiles.command_mine_all = lambda *args, **kw: [dict(key='a', ok=False, error='not_ready')]
-            overlay.start_button.invoke()
+            overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
             self.assertIn('Не выполнено: 1', overlay.status.get())
             self.assertIn('Account 1', overlay.details.get('1.0', 'end'))
-            overlay.withdraw()
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            overlay.profiles.command_mine_all = command
+            overlay.toggle_button.invoke()
+            settle(lambda: not overlay._busy)
+            overlay.profiles.command_mine_all = lambda *args, **kw: [dict(key='a', ok=False, error='unavailable')]
+            overlay.toggle_button.invoke()
+            settle(lambda: not overlay._busy)
+            self.assertEqual(overlay.toggle_button['text'], 'Стоп')
+            self.assertEqual(str(overlay.toggle_button['state']), 'normal')
+            overlay.profiles.command_mine_all = command
+            overlay.toggle_button.invoke()
+            settle(lambda: not overlay._busy)
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            overlay.hide()
             overlay.show()
             self.assertTrue(overlay.winfo_exists())
         finally:
             release.set()
+            root.destroy()
+
+    def test_panel_moves_with_parent_and_drag_stays_inside_grid(self):
+        import tkinter as tk
+        from mine_control_ui import MineControlPanel
+        root = tk.Tk()
+        root.geometry('700x480+40+40')
+        host = tk.Frame(root, bg='#090d16')
+        host.pack(fill='both', expand=True)
+        root.update()
+        panel = MineControlPanel(host, SimpleNamespace())
+        try:
+            panel.show()
+            root.update()
+            self.assertIs(panel.winfo_toplevel(), root)
+            self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in root.winfo_children()))
+            local = panel.winfo_x(), panel.winfo_y()
+            root.geometry('+160+130')
+            root.update()
+            self.assertEqual((panel.winfo_x(), panel.winfo_y()), local)
+            self.assertEqual((panel.winfo_rootx() - host.winfo_rootx(), panel.winfo_rooty() - host.winfo_rooty()), local)
+            panel.header.event_generate('<ButtonPress-1>', x=8, y=8)
+            panel.header.event_generate('<B1-Motion>', rootx=host.winfo_rootx() + 2000,
+                                        rooty=host.winfo_rooty() + 2000)
+            root.update()
+            panel.header.event_generate('<ButtonRelease-1>', x=8, y=8)
+            self.assertLessEqual(panel.winfo_x() + panel.winfo_width(), host.winfo_width())
+            self.assertLessEqual(panel.winfo_y() + panel.winfo_height(), host.winfo_height())
+            self.assertIsNone(panel.grab_current())
+            root.geometry('380x260')
+            root.update()
+            self.assertLessEqual(panel.winfo_x() + panel.winfo_width(), host.winfo_width())
+            self.assertLessEqual(panel.winfo_y() + panel.winfo_height(), host.winfo_height())
+            root.withdraw()
+            root.update()
+            self.assertFalse(panel.winfo_ismapped())
+            root.deiconify()
+            root.update()
+            self.assertTrue(panel.winfo_ismapped())
+            panel.hide()
+            root.update()
+            self.assertFalse(panel.winfo_ismapped())
+            panel.show()
+            root.update()
+            self.assertTrue(panel.winfo_ismapped())
+        finally:
             root.destroy()
