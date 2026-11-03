@@ -35,6 +35,9 @@ __pycache__/
 venv/
 node_modules/
 dist/
+build/
+build-cache/
+*.spec
 *.zip
 SHA256SUMS.txt
 .DS_Store

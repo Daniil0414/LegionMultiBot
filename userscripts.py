@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 
 from vpn_runtime import atomic_json, runtime_lock
+from app_paths import APP_DIR
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SCRIPT_URL = 'https://github.com/Daniil0414/LegionAutoMiner/blob/main/mine-bot.user.js'
@@ -108,7 +109,7 @@ def compile_script(source):
 
 class UserscriptManager:
     def __init__(self, path=None):
-        self.path = Path(path) if path else BASE_DIR / 'userscript_config.json'
+        self.path = Path(path) if path else APP_DIR / 'userscript_config.json'
         self._lock = threading.RLock()
 
     def _read(self):

@@ -19,8 +19,9 @@ from browser_profiles import BrowserProfiles, LaunchCancelled
 from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySelectionCancelled
 from proxy_network import fetch_proxy_ip
 from vpn_runtime import process_identity
+from app_paths import APP_DIR, bundled_browser
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+CURRENT_DIR = str(APP_DIR)
 LAUNCH_LOG = logging.getLogger('legion.launch')
 
 
@@ -142,6 +143,9 @@ def init_windows_dpi_awareness():
 
 # 2. Locate Chrome executable
 def find_chrome():
+    portable = bundled_browser()
+    if portable:
+        return portable
     candidates = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -2847,7 +2851,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
             self.after_cancel(self._resize_timer)
         self._resize_timer = self.after(80, self.reposition_all_active_windows)
 
-if __name__ == "__main__":
+def main():
     configure_launch_logging()
     init_windows_dpi_awareness()
 
@@ -2869,3 +2873,7 @@ if __name__ == "__main__":
         finally:
             app.proxy_manager.close()
             kernel32.CloseHandle(mutex)
+
+
+if __name__ == "__main__":
+    main()

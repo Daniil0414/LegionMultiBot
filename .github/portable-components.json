@@ -1,0 +1,26 @@
+{
+  "pyinstaller": "6.22.3",
+  "components": [
+    {
+      "name": "node",
+      "version": "v26.13.0",
+      "url": "https://nodejs.org/dist/v26.13.0/node-v26.13.0-win-x64.zip",
+      "sha256": "dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a",
+      "bytes": 41157375
+    },
+    {
+      "name": "chromium",
+      "version": "1733251",
+      "url": "https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/1733251/chrome-win.zip",
+      "sha256": "3eb4863afbfcfe02abaff127fbdbee06206b466e69772bc6446de670f08eef6f",
+      "bytes": 369672381
+    },
+    {
+      "name": "xray",
+      "version": "v26.10.31",
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-windows-64.zip",
+      "sha256": "2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a",
+      "bytes": 16623726
+    }
+  ]
+}

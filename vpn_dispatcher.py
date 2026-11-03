@@ -29,7 +29,9 @@ from vpn_runtime import (atomic_json, process_identity, runtime_lock, process_de
 from browser_lifecycle import BrowserJob, resume_browser as resume_process
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+from app_paths import APP_DIR, bundled_xray
+
+CURRENT_DIR = str(APP_DIR)
 LEGACY_CONFIG_FILE = os.path.join(CURRENT_DIR, "vpn_config.json")
 RUNTIME_DIR = os.path.join(CURRENT_DIR, ".vpn_runtime")
 CONFIG_FILE = os.path.join(RUNTIME_DIR, "vpn_config.json")
@@ -98,6 +100,7 @@ HAPP_IMPORT_FAILURE = (
 
 # Candidate paths for Xray executable
 XRAY_CANDIDATES = [
+    bundled_xray(),
     r"C:\Program Files\FlyFrogLLC\Happ\core\xray.exe",
     os.path.join(CURRENT_DIR, "..", "bin", "xray.exe"),
     os.path.join(CURRENT_DIR, "xray.exe")

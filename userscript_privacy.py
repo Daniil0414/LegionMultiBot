@@ -3,13 +3,13 @@ import functools
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import threading
 import urllib.parse
 
 from vpn_runtime import atomic_json, runtime_lock
+from app_paths import bundled_node
 
 BASE_DIR = Path(__file__).resolve().parent
 PRIVATE_KEYS = frozenset(('lg_funded_drills_keys', 'lg_my_funded_drills_count',
@@ -28,7 +28,7 @@ def supported_bot(meta):
 
 @functools.lru_cache(maxsize=4)
 def adapt_bot(source):
-    node = shutil.which('node')
+    node = bundled_node()
     if not node:
         raise RuntimeError('Для защищённого хранения состояния бота необходим Node.js.')
     result = subprocess.run([node, str(BASE_DIR / 'userscript_transform.js')],
