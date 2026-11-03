@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from browser_profiles import BrowserProfiles
 from userscripts import UserscriptManager, compile_script
@@ -43,7 +43,8 @@ class BatchMineTests(unittest.TestCase):
 
     @staticmethod
     def controller(command):
-        return SimpleNamespace(command_mine=command, close=lambda: None,
+        return SimpleNamespace(command_mine=lambda action, target_id=None: command(action),
+                               mine_targets=lambda: ['page'], close=lambda: None,
                                connection=SimpleNamespace(closed=threading.Event(), job=None))
 
     def test_all_open_profiles_are_addressed_even_if_one_fails(self):
@@ -63,14 +64,14 @@ class BatchMineTests(unittest.TestCase):
         self.assertEqual(next(r['error'] for r in results if r['key'] == 'broken'), 'unavailable')
 
     def test_stop_supersedes_queued_starts_and_runs_after_inflight_starts(self):
-        release, eight_started = threading.Event(), threading.Event()
+        release, first_started = threading.Event(), threading.Event()
         lock, calls = threading.Lock(), {str(i): [] for i in range(12)}
         def command(key):
             def send(action):
                 with lock:
                     calls[key].append(action)
-                    if sum(values.count('start') for values in calls.values()) == 8:
-                        eight_started.set()
+                    if action == 'start':
+                        first_started.set()
                 if action == 'start' and not release.wait(5):
                     raise TimeoutError('fixture start was not released')
                 return [dict(ok=True, state='running' if action == 'start' else 'paused')]
@@ -80,7 +81,7 @@ class BatchMineTests(unittest.TestCase):
         stop = threading.Thread(target=lambda: self.profiles.command_mine_all('pause', requested_at=2))
         start.start()
         try:
-            self.assertTrue(eight_started.wait(3))
+            self.assertTrue(first_started.wait(3))
             stop.start()
             deadline = time.monotonic() + 3
             while self.profiles._mine_requested_at != 2 and time.monotonic() < deadline:
@@ -92,7 +93,7 @@ class BatchMineTests(unittest.TestCase):
             if stop.ident is not None:
                 stop.join(5)
         self.assertFalse(start.is_alive() or stop.is_alive())
-        self.assertEqual(sum(values.count('start') for values in calls.values()), 8)
+        self.assertEqual(sum(values.count('start') for values in calls.values()), 1)
         self.assertTrue(all(values[-1] == 'pause' for values in calls.values()))
         self.assertEqual(self.profiles.command_mine_all('start', requested_at=1), [])
         self.assertTrue(all(values[-1] == 'pause' for values in calls.values()))
@@ -101,6 +102,106 @@ class BatchMineTests(unittest.TestCase):
         self.assertEqual(self.profiles.command_mine_all('pause'), [])
         with self.assertRaises(ValueError):
             self.profiles.command_mine_all('anything')
+        for bounds in ((-1, 5), (1, 6), (True, 5), (1.0, 5.0)):
+            with self.subTest(bounds=bounds), self.assertRaises(ValueError):
+                self.profiles.command_mine_all('start', delay_range=bounds)
+
+    def test_delay_is_between_each_window_and_respects_account_order_for_both_actions(self):
+        for action in ('start', 'pause'):
+            with self.subTest(action=action):
+                events, updates = [], []
+                controllers = {}
+                for key in ('second', 'first'):
+                    controller = self.controller(lambda command: [])
+                    controller.mine_targets = lambda: ['tab-a', 'tab-b']
+                    def send(command, target_id, key=key):
+                        events.append(('send', key, target_id, command))
+                        return [dict(ok=True, state='running' if command == 'start' else 'paused')]
+                    controller.command_mine = send
+                    controllers[key] = controller
+                self.profiles._controllers = controllers
+                event = Mock(wraps=threading.Event())
+                event.wait.side_effect = lambda delay: events.append(('wait', delay)) or False
+                with (patch('browser_profiles.threading.Event', return_value=event),
+                      patch('browser_profiles.random.randint', side_effect=[1, 5, 3]) as draw):
+                    results = self.profiles.command_mine_all(action, delay_range=(1, 5),
+                        profile_order=['first', 'second'], progress=updates.append)
+                self.assertEqual(events, [('send', 'first', 'tab-a', action), ('wait', 1),
+                    ('send', 'first', 'tab-b', action), ('wait', 5),
+                    ('send', 'second', 'tab-a', action), ('wait', 3), ('send', 'second', 'tab-b', action)])
+                self.assertEqual(draw.call_count, 3)
+                self.assertTrue(all(call.args == (1, 5) for call in draw.call_args_list))
+                self.assertEqual([r['key'] for r in results], ['first', 'first', 'second', 'second'])
+                self.assertEqual(updates[-1]['completed'], 4)
+
+    def test_zero_delay_never_waits_and_1_to_10_uses_the_selected_range(self):
+        self.profiles._controllers = {key: self.controller(lambda action: [dict(ok=True)]) for key in ('a', 'b')}
+        for bounds in ((0, 0), (1, 10)):
+            with self.subTest(bounds=bounds):
+                event = Mock(wraps=threading.Event())
+                event.wait.return_value = False
+                with (patch('browser_profiles.threading.Event', return_value=event),
+                      patch('browser_profiles.random.randint', return_value=10) as draw):
+                    self.profiles.command_mine_all('start', delay_range=bounds)
+                if bounds == (0, 0):
+                    event.wait.assert_not_called()
+                    draw.assert_not_called()
+                else:
+                    draw.assert_called_once_with(1, 10)
+                    event.wait.assert_called_once_with(10)
+
+    def test_late_start_thread_cannot_run_after_newer_stop_was_pressed(self):
+        calls = []
+        self.profiles._controllers = {'a': self.controller(lambda action: calls.append(action) or [dict(ok=True)])}
+        self.profiles.cancel_mine_commands(before=2)
+        self.assertEqual(self.profiles.command_mine_all('start', requested_at=1), [])
+        self.profiles.command_mine_all('pause', requested_at=2)
+        self.assertEqual(calls, ['pause'])
+
+    def test_pause_interrupts_a_ten_second_start_delay(self):
+        waiting, calls, old_results = threading.Event(), [], []
+        self.profiles._controllers = {key: self.controller(
+            lambda action, key=key: calls.append((key, action)) or [dict(ok=True)]) for key in ('a', 'b')}
+        def progress(state):
+            if state['delay']:
+                waiting.set()
+        def start():
+            old_results.extend(self.profiles.command_mine_all('start', requested_at=1,
+                               delay_range=(1, 10), progress=progress))
+        worker = threading.Thread(target=start)
+        with patch('browser_profiles.random.randint', return_value=10):
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                self.profiles.command_mine_all('pause', requested_at=2)
+                worker.join(2)
+                self.assertFalse(worker.is_alive(), 'Stop waited for the old ten-second start delay')
+                self.assertEqual(calls, [('a', 'start'), ('a', 'pause'), ('b', 'pause')])
+                self.assertEqual(old_results[-1]['error'], 'superseded')
+            finally:
+                self.profiles.cancel_pending()
+                worker.join(2)
+
+    def test_closing_profiles_wakes_an_active_delay(self):
+        waiting, calls = threading.Event(), []
+        self.profiles._controllers = {key: self.controller(
+            lambda action, key=key: calls.append(key) or [dict(ok=True)]) for key in ('a', 'b')}
+        def progress(state):
+            if state['delay']:
+                waiting.set()
+        worker = threading.Thread(target=lambda: self.profiles.command_mine_all('start',
+                                  delay_range=(1, 10), progress=progress))
+        with patch('browser_profiles.random.randint', return_value=10):
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                self.profiles.cancel_pending()
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(calls, ['a'])
+            finally:
+                self.profiles.cancel_pending()
+                worker.join(2)
 
     def test_supported_cached_script_has_one_mine_control(self):
         path = Path(__file__).resolve().parents[1] / 'userscript_config.json'
@@ -185,6 +286,49 @@ class OverlayMineTests(unittest.TestCase):
             if enabled:
                 gc.enable()
         self.addCleanup(collect_on_main_thread)
+
+    def test_auto_panel_is_shown_once_after_first_game_window(self):
+        import app_container as app
+        launcher = SimpleNamespace(_mine_auto_shown=False, _shutting_down=False, open_mine_control=Mock())
+        for _ in range(2):
+            app.HighQualityMultiBoxerApp._show_mine_control_after_game_open(launcher)
+        launcher.open_mine_control.assert_called_once_with()
+        self.assertTrue(launcher._mine_auto_shown)
+        launcher._mine_auto_shown = False
+        launcher._shutting_down = True
+        app.HighQualityMultiBoxerApp._show_mine_control_after_game_open(launcher)
+        self.assertEqual(launcher.open_mine_control.call_count, 1)
+
+    def test_delay_picker_defaults_and_dispatches_selected_range_for_start_and_pause(self):
+        import tkinter as tk
+        from mine_control_ui import MineControlPanel, DELAY_OPTIONS
+        root = tk.Tk()
+        root.geometry('700x480+40+40')
+        root.update()
+        calls = []
+        def command(action, **kwargs):
+            calls.append((action, kwargs))
+            return [dict(key='a', ok=True)]
+        panel = MineControlPanel(root, SimpleNamespace(command_mine_all=command), lambda: {'a': 'First', 'b': 'Second'})
+        try:
+            panel.show()
+            self.assertEqual(panel.delay.get(), '1–5 сек')
+            for label, bounds in DELAY_OPTIONS.items():
+                panel.delay.set(label)
+                for action in ('start', 'pause'):
+                    panel.submit(action)
+                    self.assertEqual(str(panel.delay_picker['state']), 'disabled')
+                    until = time.monotonic() + 3
+                    while panel._busy and time.monotonic() < until:
+                        root.update()
+                        time.sleep(.015)
+                    self.assertFalse(panel._busy)
+                    self.assertEqual(str(panel.delay_picker['state']), 'readonly')
+                    self.assertEqual(calls[-1][0], action)
+                    self.assertEqual(calls[-1][1]['delay_range'], bounds)
+                    self.assertEqual(calls[-1][1]['profile_order'], ['a', 'b'])
+        finally:
+            root.destroy()
 
     def test_drag_repaints_exposed_slots_without_leaving_panel_pixels(self):
         import tkinter as tk
@@ -280,19 +424,19 @@ class OverlayMineTests(unittest.TestCase):
             self.fail('Overlay did not settle')
         try:
             overlay.show()
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             overlay.toggle_button.invoke()
             self.assertEqual(str(overlay.toggle_button['state']), 'normal')
             self.assertEqual(overlay.toggle_button['text'], 'Стоп')
             overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
             self.assertIn('на паузе: 1 из 1', overlay.status.get())
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             release.set()
             time.sleep(.05)
             overlay._poll()
             self.assertIn('на паузе: 1 из 1', overlay.status.get())
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
             self.assertIn('Копание включено: 1 из 1', overlay.status.get())
@@ -300,7 +444,7 @@ class OverlayMineTests(unittest.TestCase):
             overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
             self.assertIn('на паузе: 1 из 1', overlay.status.get())
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             if os.environ.get('LEGION_MINE_SCREENSHOT'):
                 from PIL import ImageGrab
                 root.update()
@@ -313,7 +457,7 @@ class OverlayMineTests(unittest.TestCase):
             settle(lambda: not overlay._busy)
             self.assertIn('Не выполнено: 1', overlay.status.get())
             self.assertIn('Account 1', overlay.details.get('1.0', 'end'))
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             overlay.profiles.command_mine_all = command
             overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
@@ -325,7 +469,7 @@ class OverlayMineTests(unittest.TestCase):
             overlay.profiles.command_mine_all = command
             overlay.toggle_button.invoke()
             settle(lambda: not overlay._busy)
-            self.assertEqual(overlay.toggle_button['text'], 'Запустить автошахту для всех')
+            self.assertEqual(overlay.toggle_button['text'], 'Запустить всех в шахту')
             overlay.hide()
             overlay.show()
             self.assertTrue(overlay.winfo_exists())

@@ -9,7 +9,7 @@ import re
 import queue
 import logging
 from logging.handlers import RotatingFileHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import ctypes
 from ctypes import wintypes
 import tkinter as tk
@@ -17,6 +17,8 @@ from tkinter import ttk, messagebox, simpledialog
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, HAPP_IMPORT_FAILURE, subscription_url as normalize_subscription_url
 from browser_profiles import BrowserProfiles, LaunchCancelled
 from mine_control_ui import MineControlPanel
+from account_loading_ui import AccountLoadingOverlay
+from embedded_login_ui import EmbeddedLoginView
 from browser_focus import DockedBrowserFocus
 from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySelectionCancelled
 from proxy_network import fetch_proxy_ip
@@ -386,6 +388,10 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self._closing_browsers = False
         self._shutting_down = False
         self._mine_overlay = None
+        self._mine_auto_shown = False
+        self._accounts_dialog = None
+        self._login_task = None
+        self._login_view = None
         self.protocol('WM_DELETE_WINDOW', self.shutdown_app)
         self.browser_sessions = {}
         self._session_check_busy = False
@@ -428,7 +434,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         self.setup_ui()
         self.bind_events()
-        self._browser_focus = DockedBrowserFocus(self, lambda: self.profile_hwnds.values())
+        self._browser_focus = DockedBrowserFocus(self, self._browser_hwnds_for_focus)
         self.update_page_nav()
         self.deiconify()
 
@@ -498,14 +504,18 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self.wait_window(dialog)
         return choice
 
-    def get_launch_proxy(self, key, slot_idx):
+    def get_launch_proxy(self, key, slot_idx, status_callback=None):
         if not self.use_vpn:
             return 'DIRECT'
         generation = self.browser_profiles.generation
+        def status(message):
+            if status_callback:
+                status_callback(message)
+            self.after(0, lambda: self.status_lbl.config(text=message))
         try:
             return self.proxy_manager.get_resilient_proxy_for_slot(
                 self.browser_profiles.proxy_slot(key, slot_idx), profile_key=key,
-                status_callback=lambda m: self.after(0, lambda msg=m: self.status_lbl.config(text=msg)),
+                status_callback=status,
                 cancel_callback=lambda: self._closing_browsers or generation != self.browser_profiles.generation)
         except ProxySelectionCancelled:
             raise LaunchCancelled()
@@ -1436,6 +1446,12 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self._shutting_down:
             return
         self._shutting_down = True
+        login_view = getattr(self, '_login_view', None)
+        if login_view is not None:
+            login_view.release()
+        login_task = getattr(self, '_login_task', None)
+        if login_task is not None and not login_task.done():
+            login_task.set_exception(LaunchCancelled('Приложение закрывается.'))
         overlay = getattr(self, '_mine_overlay', None)
         if overlay is not None:
             overlay.hide()
@@ -1682,6 +1698,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
     def dock_hwnd_to_slot(self, hwnd, slot_idx, width=None, height=None, _settle_attempt=0):
         """Dock only Chrome's page area, clipping tabs, toolbar and window borders.
         Optimized to NEVER re-dock, re-parent, or trigger SWP_FRAMECHANGED on already docked windows."""
+        login_view = getattr(self, '_login_view', None)
+        if login_view is not None and login_view.owns(hwnd):
+            return
         if not hwnd or not user32.IsWindow(hwnd) or slot_idx >= len(self.slot_cards):
             return
 
@@ -1858,6 +1877,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
         panel = getattr(self, '_mine_overlay', None)
         if panel is not None and panel.winfo_ismapped():
             panel.lift()
+        login_view = getattr(self, '_login_view', None)
+        if login_view is not None and login_view.visible:
+            login_view.lift()
 
     def move_to_monitor(self, monitor_idx):
         if monitor_idx >= len(self.monitors):
@@ -2103,9 +2125,13 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self.switch_page(self.current_page)
         self.reposition_all_active_windows()
 
-    def launch_account_for_login(self, key):
+    def launch_account_for_login(self, key, progress=None):
         if self._closing_browsers:
             return
+        active = getattr(self, '_login_task', None)
+        if active is not None and not active.done():
+            return active
+        task = self._login_task = Future()
         generation = self.browser_profiles.generation
         keys = [p["key"] for p in self.bot_profiles]
         idx = keys.index(key) if key in keys else 0
@@ -2113,19 +2139,32 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         connection = "VPN" if self.use_vpn else "прямого подключения"
         self.status_lbl.config(text=f"🌐 Подготовка {connection} для {p_name}...")
+        muted = self.mute_var.get()
+
+        def report(title, detail):
+            if progress:
+                progress((title, detail))
 
         def _worker():
+            if not task.set_running_or_notify_cancel():
+                return
             try:
                 # 1. Get working proxy inside worker thread so UI never freezes
-                proxy_arg = self.get_launch_proxy(key, idx)
+                report('Проверка VPN' if self.use_vpn else 'Открытие браузера', p_name)
+                if progress:
+                    proxy_arg = self.get_launch_proxy(key, idx,
+                        status_callback=lambda text: report('Проверка VPN', text))
+                else:
+                    proxy_arg = self.get_launch_proxy(key, idx)
                 if proxy_arg == "ERROR_ALL_DOWN" or not proxy_arg:
-                    self.after(0, lambda: self.status_lbl.config(text="🛑 Авторизация заблокирована: VPN не подключен."))
-                    return
+                    raise RuntimeError('VPN не подключён: ни один сервер не прошёл проверку.')
+
+                report('Открытие браузера', f'{p_name} · Подготовка профиля и окна входа…')
 
                 target_url = "https://play.multidonate.ru/c/zakvielchannel/"
                 args = [
                     CHROME_EXE,
-                    target_url,
+                    f'--app={target_url}',
                     "--window-size=1050,850",
                     "--disable-breakpad",
                     "--disable-sync",
@@ -2133,19 +2172,106 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     "--no-first-run",
                     "--no-default-browser-check"
                 ]
-                if self.mute_var.get():
+                if muted:
                     args.append("--mute-audio")
 
                 session = self.browser_profiles.launch(CHROME_EXE, key, proxy_arg, args[1:], generation=generation)
                 self.browser_sessions[key] = session
-                self.after(0, lambda: self.status_lbl.config(text=f"🌐 Открыто окно авторизации: {p_name}. Войдите в Twitch..."))
-            except LaunchCancelled:
-                return
+                present = getattr(self, '_present_login_browser', None)
+                if present:
+                    self.after(0, lambda: present(key, session, task, generation))
+                else:
+                    self.after(0, lambda: self.status_lbl.config(text=f"🌐 Открыто окно авторизации: {p_name}. Войдите в Twitch..."))
+                    show_controls = getattr(self, '_show_mine_control_after_game_open', None)
+                    if show_controls:
+                        self.after(0, show_controls)
+                    if not task.done():
+                        task.set_result(session)
             except Exception as e:
-                self.after(0, lambda msg=str(e): messagebox.showerror("Ошибка", f"Не удалось открыть окно: {msg}"))
+                if not task.done():
+                    task.set_exception(e)
+                if not self._closing_browsers:
+                    try:
+                        self.after(0, lambda msg=str(e): self.status_lbl.config(text=f'Не удалось открыть {p_name}: {msg}'))
+                        if progress is None and not isinstance(e, LaunchCancelled):
+                            self.after(0, lambda msg=str(e): messagebox.showerror("Ошибка", f"Не удалось открыть окно: {msg}"))
+                    except (RuntimeError, tk.TclError):
+                        pass  # The application can be closing while a worker finishes.
 
-        threading.Thread(target=_worker, daemon=True).start()
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as error:
+            task.set_exception(error)
+        return task
 
+
+    def _browser_hwnds_for_focus(self):
+        handles = set(self.profile_hwnds.values())
+        view = getattr(self, '_login_view', None)
+        if view is not None:
+            handles.update(view.browser_hwnds)
+        return handles
+
+    def _present_login_browser(self, key, session, task, generation):
+        if task.done():
+            return
+        def cancelled():
+            return (self._shutting_down or self._closing_browsers
+                    or generation != self.browser_profiles.generation)
+        def failed(error):
+            if not task.done():
+                task.set_exception(LaunchCancelled() if cancelled() else error)
+        if cancelled():
+            failed(LaunchCancelled())
+            return
+        if self._login_view is not None and self._login_view.visible:
+            self._finish_login_browser(self._login_view)
+        if self._login_view is None:
+            self._login_view = EmbeddedLoginView(self.slots_frame, self._finish_login_browser)
+        def ready(hwnd):
+            if cancelled():
+                failed(LaunchCancelled())
+                return
+            self.profile_hwnds[key] = hwnd
+            self._show_mine_control_after_game_open()
+            self._login_view.lift()
+            self.status_lbl.config(text='Войдите через Twitch во встроенном окне, затем вернитесь к сетке.')
+            session['embedded_hwnd'] = hwnd
+            if not task.done():
+                task.set_result(session)
+            self.after(120, lambda: self._browser_focus.clicked(hwnd) if user32.IsWindow(hwnd) else None)
+        name = next((p['name'] for p in self.bot_profiles if p['key'] == key), key)
+        try:
+            self._login_view.show(key, name, session['pid'], hwnd=self.profile_hwnds.get(key),
+                                  ready=ready, failed=failed, cancelled=cancelled)
+        except (OSError, tk.TclError) as error:
+            failed(error)
+
+    def _finish_login_browser(self, view):
+        key = view.key
+        hwnd, windows = view.release()
+        for popup in windows:
+            if popup != hwnd and user32.IsWindow(popup):
+                user32.PostMessageW(popup, WM_CLOSE, 0, 0)
+        if self._shutting_down or self._closing_browsers:
+            return
+        keys = [profile['key'] for profile in self.bot_profiles]
+        if key in keys and hwnd and user32.IsWindow(hwnd):
+            self.profile_hwnds[key] = hwnd
+            self.slot_urls[key] = 'game'
+            self.fullscreen_slot = None
+            self.btn_exit_fs.pack_forget()
+            self.switch_page(keys.index(key) // self.page_size + 1, force=True)
+            self.reposition_all_active_windows()
+        else:
+            self.profile_hwnds.pop(key, None)
+            if hwnd and user32.IsWindow(hwnd):
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
+    def _show_mine_control_after_game_open(self):
+        if not self._mine_auto_shown and not self._shutting_down:
+            self.open_mine_control()
+            self._mine_auto_shown = True
 
     def open_mine_control(self):
         if self._mine_overlay is None or not self._mine_overlay.winfo_exists():
@@ -2259,7 +2385,17 @@ class HighQualityMultiBoxerApp(tk.Tk):
         return ''
 
     def open_accounts_dialog(self):
+        existing = getattr(self, '_accounts_dialog', None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            return existing
         dlg = tk.Toplevel(self)
+        self._accounts_dialog = dlg
+        def forget_dialog(event):
+            if event.widget is dlg and getattr(self, '_accounts_dialog', None) is dlg:
+                self._accounts_dialog = None
+        dlg.bind('<Destroy>', forget_dialog, add='+')
         dlg.title("👥 Управление аккаунтами ботов")
         dlg.geometry("680x560")
         dlg.minsize(560, 420)
@@ -2314,6 +2450,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
         canvas.configure(yscrollcommand=scrollbar.set)
 
         def _clean_dialog():
+            if loading.busy:
+                dlg.bell()
+                return
             try:
                 canvas.unbind_all("<MouseWheel>")
             except Exception:
@@ -2321,6 +2460,22 @@ class HighQualityMultiBoxerApp(tk.Tk):
             dlg.destroy()
 
         dlg.protocol("WM_DELETE_WINDOW", _clean_dialog)
+
+        def _begin_login(key, created_name=None):
+            def finished(session, error):
+                if getattr(self, '_login_task', None) is not None and self._login_task.done():
+                    self._login_task = None
+                if error is not None:
+                    if not isinstance(error, LaunchCancelled):
+                        messagebox.showerror('Ошибка входа', f'Не удалось открыть окно:\n{error}', parent=dlg)
+                elif session is not None and session.get('embedded_hwnd'):
+                    _clean_dialog()
+                elif session is not None and created_name:
+                    messagebox.showinfo('Аккаунт создан',
+                        f'Аккаунт «{created_name}» создан.\nОткрыто окно браузера для входа через Twitch.', parent=dlg)
+            name = next((p['name'] for p in self.bot_profiles if p['key'] == key), key)
+            return loading.start(lambda progress: self.launch_account_for_login(key, progress=progress),
+                'Проверка VPN' if self.use_vpn else 'Открытие браузера', name, finished=finished)
 
         def _render_list():
             for w in scroll_frame.winfo_children():
@@ -2384,7 +2539,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
                 # Login / open window
                 def _login(k=key):
-                    self.launch_account_for_login(k)
+                    _begin_login(k)
 
                 btn_log = tk.Button(row, text="🔑 Войти / Проверить", command=_login, bg="#059669", fg="#ffffff", activebackground="#047857", activeforeground="#ffffff", font=("Segoe UI", 8, "bold"), relief="flat", padx=8, pady=2, cursor="hand2")
                 btn_log.pack(side="right", padx=(4, 0))
@@ -2420,14 +2575,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
             _render_list()
 
             # Open clean Chrome window immediately for login!
-            self.launch_account_for_login(new_key)
-            messagebox.showinfo(
-                "Аккаунт создан",
-                f"Аккаунт «{name}» успешно создан!\n\n"
-                "Открыто окно браузера. Войдите через Twitch на открывшейся странице.\n"
-                "После авторизации вход сохранится навсегда, и бота можно запускать в сетке.",
-                parent=dlg
-            )
+            _begin_login(new_key, created_name=name)
 
         btn_add = tk.Button(
             act_bar, text="➕ Добавить аккаунт", command=_add_new_account,
@@ -2445,6 +2593,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
         btn_close.pack(fill="x", padx=14, pady=(4, 10))
 
         _render_list()
+        loading = AccountLoadingOverlay(dlg)
+        dlg._login_loading = loading
+        return dlg
 
 
     def get_zoom_factor(self):
@@ -2604,6 +2755,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     self.dock_hwnd_to_slot(new_hwnd, target_slot)
                 else:
                     user32.ShowWindow(new_hwnd, SW_HIDE)
+                if target_url.startswith('https://play.multidonate.ru/') and user32.IsWindow(new_hwnd):
+                    self._show_mine_control_after_game_open()
             self.after(200, _dock_if_current)
         else:
             message = 'Chrome запущен, но его окно не найдено. Повторите запуск; подробности в журнале browser_launch.log.'

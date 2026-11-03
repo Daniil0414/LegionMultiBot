@@ -40,6 +40,9 @@ class CleanupTests(unittest.TestCase):
         profiles._state_lock = threading.Lock()
         profiles._lock = threading.RLock()
         profiles._generation = 0
+        profiles._mine_state_lock = threading.Lock()
+        profiles._mine_cancel = threading.Event()
+        profiles._mine_cancel_before = 0
         first, second = Mock(), Mock()
         first.connection.job.close.side_effect = OSError('job close failed')
         profiles._controllers = {'first': first, 'second': second}

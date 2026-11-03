@@ -193,18 +193,23 @@ class MobileBrowser:
         self.connection.call('Runtime.evaluate',
             dict(expression=bridge_source(self._private_config), contextId=context), session)
 
-    def command_mine(self, action):
+    def mine_targets(self):
+        with self._condition:
+            targets = [target for target, data in self._targets.items() if data['type'] == 'page']
+        # Detach notifications may lag behind a just-closed bootstrap tab.
+        live = {item['targetId'] for item in self.connection.call('Target.getTargets')['targetInfos']
+                if item['type'] == 'page'}
+        return [target for target in targets if target in live]
+
+    def command_mine(self, action, target_id=None):
         from userscript_privacy import mine_command_source
         expression = mine_command_source(self._private_config, action)
         if not self._userscript or not self._userscript.get('mine_control'):
             return [dict(ok=False, error='unsupported')]
+        live = self.mine_targets()
         with self._condition:
-            targets = [(target, data['session']) for target, data in self._targets.items()
-                       if data['type'] == 'page']
-        # Detach notifications may lag behind a just-closed bootstrap tab.
-        live = {item['targetId'] for item in self.connection.call('Target.getTargets')['targetInfos']
-                if item['type'] == 'page'}
-        targets = [(target, session) for target, session in targets if target in live]
+            targets = [(target, self._targets[target]['session']) for target in live
+                       if target in self._targets and (target_id is None or target == target_id)]
         results = []
         for target, session in targets:
             try:

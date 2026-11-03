@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 
 
 if os.name == 'nt':
@@ -23,6 +24,7 @@ ERROR_TEXT = {
     'not_confirmed': 'Скрипт не подтвердил переключение автошахты.',
     'superseded': 'Отменено следующей командой.',
 }
+DELAY_OPTIONS = {'0 сек': (0, 0), '1–5 сек': (1, 5), '1–10 сек': (1, 10)}
 
 
 class MineControlPanel(tk.Frame):
@@ -31,6 +33,7 @@ class MineControlPanel(tk.Frame):
         self.profiles = profiles
         self.account_names = account_names or (lambda: {})
         self._messages = queue.Queue()
+        self._progress = queue.SimpleQueue()
         self._operation = 0
         self._busy = False
         self._poll_id = None
@@ -63,6 +66,14 @@ class MineControlPanel(tk.Frame):
         tk.Label(body, text='Все открытые окна, включая другие страницы сетки',
                  bg='#111827', fg='#94a3b8', font=('Segoe UI', 9), wraplength=330,
                  justify='left').pack(anchor='w', pady=(4, 12))
+        delay_row = tk.Frame(body, bg='#111827')
+        delay_row.pack(fill='x', pady=(0, 12))
+        tk.Label(delay_row, text='Задержка отправки в шахту\nмежду окнами:', bg='#111827', fg='#cbd5e1',
+                 font=('Segoe UI', 9), justify='left', anchor='w').pack(side='left')
+        self.delay = tk.StringVar(self, '1–5 сек')
+        self.delay_picker = ttk.Combobox(delay_row, textvariable=self.delay, values=list(DELAY_OPTIONS),
+                                          state='readonly', width=10)
+        self.delay_picker.pack(side='right')
         self.toggle_button = tk.Button(body, command=lambda: self.submit(self._next_action),
             fg='white', activeforeground='white', font=('Segoe UI', 11, 'bold'),
             relief='flat', cursor='hand2', padx=12, pady=10)
@@ -169,7 +180,7 @@ class MineControlPanel(tk.Frame):
         self._next_action = action
         starting = action == 'start'
         self.toggle_button.config(
-            text='Запустить автошахту для всех' if starting else 'Стоп',
+            text='Запустить всех в шахту' if starting else 'Стоп',
             bg='#15803d' if starting else '#7f1d1d',
             activebackground='#166534' if starting else '#991b1b',
             state='normal' if enabled else 'disabled')
@@ -191,8 +202,14 @@ class MineControlPanel(tk.Frame):
         if action not in ('start', 'pause'):
             raise ValueError('Unknown mine command')
         self._operation += 1
-        operation, requested_at = self._operation, time.monotonic_ns()
+        operation, requested_at = self._operation, time.perf_counter_ns()
+        cancel = getattr(self.profiles, 'cancel_mine_commands', None)
+        if cancel:
+            cancel(before=requested_at)
+        delay_range = DELAY_OPTIONS[self.delay.get()]
+        profile_order = list(self.account_names())
         self._busy = True
+        self.delay_picker.configure(state='disabled')
         # Stop stays available while a start batch is being delivered.
         self._set_action('pause', enabled=action == 'start')
         self.details.pack_forget()
@@ -202,7 +219,9 @@ class MineControlPanel(tk.Frame):
 
         def work():
             try:
-                results = self.profiles.command_mine_all(action, requested_at=requested_at)
+                results = self.profiles.command_mine_all(action, requested_at=requested_at,
+                    delay_range=delay_range, profile_order=profile_order,
+                    progress=lambda state: self._progress.put((operation, state)))
                 self._messages.put((operation, action, results, None))
             except Exception:
                 logging.getLogger('legion.launch').exception('Swarm mine command failed')
@@ -214,6 +233,13 @@ class MineControlPanel(tk.Frame):
 
     def _poll(self):
         self._poll_id = None
+        while not self._progress.empty():
+            operation, state = self._progress.get_nowait()
+            if operation == self._operation and self._busy:
+                text = f"Ответили: {state['completed']} из {state['total']} окон."
+                if state['delay']:
+                    text += f" Следующее окно через {state['delay']} с."
+                self.status.set(text)
         while True:
             try:
                 operation, action, results, error = self._messages.get_nowait()
@@ -222,6 +248,7 @@ class MineControlPanel(tk.Frame):
             if operation != self._operation:
                 continue
             self._busy = False
+            self.delay_picker.configure(state='readonly')
             if error:
                 # Delivery may have partially succeeded; keep a stop retry available.
                 self._set_action('pause')
@@ -275,3 +302,4 @@ class MineControlPanel(tk.Frame):
         if self._damage:
             self._repaint()
         super().destroy()
+        self.status = self.delay = None

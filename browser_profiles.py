@@ -8,7 +8,7 @@ import time
 import urllib.parse
 import json
 import atexit
-from concurrent.futures import ThreadPoolExecutor
+import random
 from userscripts import UserscriptManager
 from vpn_runtime import atomic_json, process_identity, runtime_lock
 from chrome_mobile import MobileBrowser, device_for_profile
@@ -61,6 +61,9 @@ class BrowserProfiles:
         self._mine_command_generation = 0
         self._mine_requested_at = 0
         self._mine_command_locks = {}
+        self._mine_cancel = threading.Event()
+        self._mine_state_lock = threading.Lock()
+        self._mine_cancel_before = 0
         self.userscripts = userscripts if userscripts is not None else UserscriptManager()
         self._state_lock = threading.Lock()
         self._generation = 0
@@ -74,6 +77,7 @@ class BrowserProfiles:
             return self._generation
 
     def cancel_pending(self):
+        self.cancel_mine_commands()
         with self._state_lock:
             self._generation += 1
 
@@ -113,37 +117,76 @@ class BrowserProfiles:
             self.apply_userscript(script)
             return self.userscripts.status()
 
-    def command_mine_all(self, action, requested_at=None):
-        """Address all open profiles; a newer command supersedes queued older work."""
+    def cancel_mine_commands(self, before=None):
+        """Cancel queued input without waiting for a profile/VPN launch lock."""
+        before = time.perf_counter_ns() if before is None else before
+        with self._mine_state_lock:
+            self._mine_cancel_before = max(self._mine_cancel_before, before)
+            self._mine_cancel.set()
+
+    def command_mine_all(self, action, requested_at=None, delay_range=(0, 0), profile_order=None, progress=None):
+        """Visit each open page in account order, with interruptible delays."""
         if action not in ('start', 'pause'):
             raise ValueError('Unknown mine command')
-        requested_at = time.monotonic_ns() if requested_at is None else requested_at
-        with self._lock:
-            if requested_at <= self._mine_requested_at:
+        delay_range = tuple(delay_range)
+        if delay_range not in ((0, 0), (1, 5), (1, 10)) or any(type(value) is not int for value in delay_range):
+            raise ValueError('Unknown mine command delay')
+        with self._mine_state_lock:
+            if requested_at is None:
+                requested_at = max(time.perf_counter_ns(), self._mine_requested_at + 1, self._mine_cancel_before + 1)
+            if requested_at <= self._mine_requested_at or requested_at < self._mine_cancel_before:
                 return []
             self._mine_requested_at = requested_at
+            self._mine_cancel.set()
+            cancel = self._mine_cancel = threading.Event()
             self._mine_command_generation += 1
             generation = self._mine_command_generation
+        with self._lock:
             controllers = list(self._controllers.items())
+            if profile_order:
+                order = {key: index for index, key in enumerate(profile_order)}
+                controllers.sort(key=lambda item: order.get(item[0], len(order)))
             locks = {key: self._mine_command_locks.setdefault(key, threading.Lock()) for key, _ in controllers}
+        plan, results = [], []
+        for key, controller in controllers:
+            if cancel.is_set():
+                return results
+            try:
+                if controller.connection.closed.is_set():
+                    raise RuntimeError('Closed browser')
+                plan.extend((key, controller, target) for target in controller.mine_targets())
+            except Exception:
+                results.append(dict(key=key, ok=False, error='unavailable'))
 
-        def send(item):
-            key, controller = item
+        def superseded(index):
+            return results + [dict(key=key, target=target, ok=False, error='superseded')
+                              for key, _, target in plan[index:]]
+
+        for index, (key, controller, target) in enumerate(plan):
+            if cancel.is_set():
+                return superseded(index)
+            if index and delay_range[1]:
+                delay = random.randint(*delay_range)
+                if progress:
+                    progress(dict(completed=index, total=len(plan), delay=delay, key=key))
+                if cancel.wait(delay):
+                    return superseded(index)
             with locks[key]:
                 with self._lock:
-                    if generation != self._mine_command_generation:
-                        return [dict(key=key, ok=False, error='superseded')]
+                    with self._mine_state_lock:
+                        if cancel.is_set() or generation != self._mine_command_generation:
+                            return superseded(index)
                     if self._controllers.get(key) is not controller or controller.connection.closed.is_set():
-                        return [dict(key=key, ok=False, error='unavailable')]
+                        results.append(dict(key=key, target=target, ok=False, error='unavailable'))
+                        continue
                 try:
-                    return [dict(result, key=key) for result in controller.command_mine(action)]
+                    results.extend(dict(result, key=key, target=target)
+                                   for result in controller.command_mine(action, target_id=target))
                 except Exception:
-                    return [dict(key=key, ok=False, error='unavailable')]
-
-        if not controllers:
-            return []
-        with ThreadPoolExecutor(max_workers=min(8, len(controllers))) as pool:
-            return [result for batch in pool.map(send, controllers) for result in batch]
+                    results.append(dict(key=key, target=target, ok=False, error='unavailable'))
+            if progress:
+                progress(dict(completed=index + 1, total=len(plan), delay=0, key=key))
+        return results
 
     def navigate_app(self, key, url, generation=None):
         """Navigate the existing app window without relaunching or changing its route."""
