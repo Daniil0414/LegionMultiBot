@@ -42,3 +42,7 @@ build-cache/
 SHA256SUMS.txt
 .DS_Store
 Thumbs.db
+*$py.class
+.vpn_runtime/*
+!.vpn_runtime/.gitkeep
+stealth_shield/user_bot_script.js

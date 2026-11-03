@@ -16,9 +16,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, HAPP_IMPORT_FAILURE, subscription_url as normalize_subscription_url
 from browser_profiles import BrowserProfiles, LaunchCancelled
+from browser_focus import DockedBrowserFocus
 from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySelectionCancelled
 from proxy_network import fetch_proxy_ip
 from vpn_runtime import process_identity
+from app_update_ui import StartupUpdater
 from app_paths import APP_DIR, bundled_browser
 
 CURRENT_DIR = str(APP_DIR)
@@ -327,7 +329,7 @@ def format_proxy_badge_info(proxy_str, is_narrow=False, vpn_dispatcher=None):
                 clean = "Автовыбор ⚡"
             elif len(clean) > 13:
                 clean = clean[:11] + "…"
-
+            
             badge_text = f"🛡️ {clean}" if is_narrow else f"🛡️ Happ: {clean}"
             tooltip = f"Happ VPN (SOCKS5 127.0.0.1:10808)\nСервер: {happ_server}"
             return badge_text, "#064e3b", "#34d399", tooltip
@@ -353,7 +355,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self.use_vpn is None:
             self.destroy()
             raise SystemExit(0)
-
+        
         # Start in maximized window mode (оконный режим на полный экран)
         self.geometry("1680x960+50+50")
         self.minsize(880, 540)
@@ -369,7 +371,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         # Accounts (Clean standalone Bot Profiles)
         self.bot_profiles = load_accounts()
-
+        
         # Grid Configuration (Default: 6x2 = 12 smartphones, 2 pages for 21 bots)
         self.current_grid_key = "6x2"
         self.page_size = GRID_CONFIGS[self.current_grid_key]["slots"] # 12
@@ -424,6 +426,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         self.setup_ui()
         self.bind_events()
+        self._browser_focus = DockedBrowserFocus(self, lambda: self.profile_hwnds.values())
         self.update_page_nav()
         self.deiconify()
 
@@ -433,6 +436,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
 
         # Initial layout computation after event loop starts
         self.after(50, self.reposition_all_active_windows)
+
+        self._app_updater = StartupUpdater(self, CURRENT_DIR, self.shutdown_app)
+        self.after(250, self._app_updater.start)
 
         # Periodic check for active Happ server updates
         if self.use_vpn:
@@ -495,7 +501,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
             return 'DIRECT'
         generation = self.browser_profiles.generation
         try:
-            return self.proxy_manager.get_working_proxy_for_slot(
+            return self.proxy_manager.get_resilient_proxy_for_slot(
                 self.browser_profiles.proxy_slot(key, slot_idx), profile_key=key,
                 status_callback=lambda m: self.after(0, lambda msg=m: self.status_lbl.config(text=msg)),
                 cancel_callback=lambda: self._closing_browsers or generation != self.browser_profiles.generation)
@@ -552,10 +558,14 @@ class HighQualityMultiBoxerApp(tk.Tk):
             values = ('⚪ VPN' if is_compact else 'Не проверен', '#1e293b', '#94a3b8', 'Нет подтверждённого окна с назначенным прокси')
         else:
             is_compact = self.current_grid_key in ('6x2', '8x2')
+            route_status = self.proxy_manager.failover_status(session['proxy'])
+            active_proxy = route_status.get('proxy') if route_status else session['proxy']
             values = format_proxy_badge_info(
-                session['proxy'], is_narrow=is_compact,
+                active_proxy, is_narrow=is_compact,
                 vpn_dispatcher=self.proxy_manager.vpn_dispatcher)
             values = (*values[:3], values[3] + f"\nHTTPS через прокси: {session['verified_ip']}\nПроцесс окна: {session['pid']}")
+            if route_status:
+                values = (*values[:3], values[3] + ('\nРезерв VPN готов' if route_status['standby_ready'] else '\nПоиск отдельного резерва VPN'))
         text_value, background, foreground, tooltip = values
         badge.config(text=text_value, bg=background, fg=foreground)
         badge.bind('<Enter>', lambda event, msg=tooltip: self.status_lbl.config(text=' | '.join(msg.splitlines())))
@@ -573,22 +583,12 @@ class HighQualityMultiBoxerApp(tk.Tk):
             vd = self.proxy_manager.vpn_dispatcher
             nodes = vd.get_nodes_snapshot()
             if nodes and (vd.is_running or vd.xray_bin):
-                count = len(nodes)
-                checked = vd._health_revision == vd._nodes_revision
-                self.badge_stealth.config(
-                    text=f"🌐 VPN: {len(vd.alive_nodes) if checked else '?'}/{count}",
-                    bg="#0f2b3e", fg="#38bdf8"
-                )
                 self.update_all_slot_proxy_badges()
             else:
                 curr_server = get_happ_active_server()
                 if curr_server != self._last_known_happ_server:
                     self._last_known_happ_server = curr_server
                     self.update_all_slot_proxy_badges()
-                    clean_top = curr_server if curr_server else "VPN (Happ)"
-                    if clean_top.startswith("Автовыбор"):
-                        clean_top = "Автовыбор ⚡"
-                    self.badge_stealth.config(text="Настройте VPN", bg="#1e293b", fg="#fbbf24")
         except Exception:
             pass
 
@@ -606,7 +606,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
             return
         now = time.monotonic()
         stale = [(key, session) for key, session in self.browser_sessions.items()
-                 if now - session.get('verified_at', 0) >= 30]
+                 if now - session.get('verified_at', 0) >=
+                 (2 if self.proxy_manager.failover_status(session['proxy']) is not None else 30)]
         if not stale:
             return
         self._session_check_busy = True
@@ -615,6 +616,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
             def probe(item):
                 key, session = item
                 try:
+                    route = self.proxy_manager.failover_status(session['proxy'])
+                    if route is not None:
+                        return key, session, route['ip']
                     return key, session, fetch_proxy_ip(session['proxy'])
                 except Exception:
                     return key, session, None
@@ -701,28 +705,6 @@ class HighQualityMultiBoxerApp(tk.Tk):
         # Separator
         tk.Label(self.header_bar, text="|", bg="#0d1424", fg="#334155").pack(side="left", padx=2)
 
-        # Permanent VPN Badge
-        vd = self.proxy_manager.vpn_dispatcher
-        if not self.use_vpn:
-            init_stealth_text = "Без VPN"
-        elif vd.nodes and (vd.is_running or vd.xray_bin):
-            init_stealth_text = f"🌐 VPN: ?/{len(vd.nodes)}"
-        else:
-            happ_init = get_happ_active_server() or "VPN (Happ)"
-            clean_init = "Автовыбор ⚡" if happ_init.startswith("Автовыбор") else happ_init
-            init_stealth_text = "Настройте VPN"
-
-        self.badge_stealth = tk.Label(
-            self.header_bar, text=init_stealth_text,
-            font=("Segoe UI", 8, "bold"), bg="#0f2b3e", fg="#38bdf8", padx=5, pady=1, cursor="hand2"
-        )
-        self.badge_stealth.pack(side="left", padx=2)
-        self.badge_stealth.bind("<Button-1>", lambda e: self.open_proxy_settings())
-        network_hint = ("🔒 Нажмите, чтобы открыть диспетчер подписки и мульти-прокси (Xray)"
-                        if self.use_vpn else "Прямое подключение. Для смены режима перезапустите программу.")
-        self.badge_stealth.bind("<Enter>", lambda e: self.status_lbl.config(text=network_hint))
-        self.badge_stealth.bind("<Leave>", lambda e: self.update_active_bot_status_bar())
-
         # Dynamic Grid Switcher
         self.btn_grid = tk.Button(
             self.header_bar, text=GRID_CONFIGS[self.current_grid_key]["label"], command=self.cycle_grid_mode,
@@ -778,11 +760,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self.flip_countdown_lbl = tk.Label(self.header_bar, text="", font=("JetBrains Mono", 8, "bold"), bg="#0d1424", fg="#fbbf24")
         self.flip_countdown_lbl.pack(side="left", padx=1)
 
-        # Separator
-        tk.Label(self.header_bar, text="|", bg="#0d1424", fg="#334155").pack(side="left", padx=2)
-
-        # Zoom Scale Dropdown
-        tk.Label(self.header_bar, text="Масштаб Chrome: Ctrl + / −", bg="#0d1424", fg="#94a3b8", font=("Segoe UI", 8)).pack(side="left", padx=3)
+        # Browser zoom state
         self.zoom_var = tk.StringVar(value="100%")
 
         # Checkboxes
@@ -1449,6 +1427,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._browser_focus.close()
         if self._status_spinner_timer is not None:
             self.after_cancel(self._status_spinner_timer)
             self._status_spinner_timer = None
@@ -1458,10 +1437,11 @@ class HighQualityMultiBoxerApp(tk.Tk):
         done = threading.Event()
         def worker():
             try:
-                self.browser_profiles.shutdown()
-                self.proxy_manager.close()
-            except Exception:
-                LAUNCH_LOG.exception('Application shutdown cleanup failed')
+                for cleanup in (self.browser_profiles.shutdown, self.proxy_manager.close):
+                    try:
+                        cleanup()
+                    except Exception:
+                        LAUNCH_LOG.exception('Application shutdown cleanup failed')
             finally:
                 done.set()
         threading.Thread(target=worker, daemon=False).start()
@@ -2871,8 +2851,10 @@ def main():
         try:
             app.browser_profiles.shutdown()
         finally:
-            app.proxy_manager.close()
-            kernel32.CloseHandle(mutex)
+            try:
+                app.proxy_manager.close()
+            finally:
+                kernel32.CloseHandle(mutex)
 
 
 if __name__ == "__main__":

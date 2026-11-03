@@ -289,8 +289,11 @@ class BrowserProfiles:
             finally:
                 # Keep strong references until every job has been released, even on error.
                 for controller in controllers.values():
-                    if controller.connection and controller.connection.job:
-                        controller.connection.job.close()
+                    try:
+                        if controller.connection and controller.connection.job:
+                            controller.connection.job.close()
+                    except Exception as exc:
+                        error = error or exc
             if error:
                 raise error
 

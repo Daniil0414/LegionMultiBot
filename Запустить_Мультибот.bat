@@ -3,10 +3,15 @@ chcp 65001 >nul
 cd /d "%~dp0"
 title Legion Multi-Bot Client
 
-if not exist "%~dp0app\LegionMultiBot.exe" (
-    echo Не найдено приложение. Распакуйте полностью LegionMultiBot-windows.zip из раздела Releases.
-    pause
-    exit /b 1
+if exist "%~dp0app\LegionMultiBot.exe" (
+    start "" "%~dp0app\LegionMultiBot.exe"
+    exit /b
 )
-start "" "%~dp0app\LegionMultiBot.exe"
+
+where pythonw >nul 2>nul
+if %errorlevel% equ 0 (
+    start "" pythonw app_container.py
+) else (
+    start "" python app_container.py
+)
 exit

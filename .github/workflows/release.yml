@@ -23,6 +23,12 @@ jobs:
           python-version: '3.12'
       - name: Install build tool
         run: python -m pip install pyinstaller==6.22.3
+      - name: Run application tests
+        run: |
+          python -B -m unittest discover -s tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/*.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and verify standalone archive
         run: python .github/build_portable.py --output dist
       - name: Publish GitHub release
@@ -30,5 +36,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "LegionMultiBot $env:GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md dist/LegionMultiBot-windows.zip dist/SHA256SUMS.txt
+          gh release create "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "LegionMultiBot $env:GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md dist/LegionMultiBot-windows.zip dist/legion-multibot.zip dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

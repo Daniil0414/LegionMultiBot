@@ -28,7 +28,6 @@ from vpn_runtime import (atomic_json, process_identity, runtime_lock, process_de
                          process_is_alive, terminate_verified_process)
 from browser_lifecycle import BrowserJob, resume_browser as resume_process
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from app_paths import APP_DIR, bundled_xray
 
 CURRENT_DIR = str(APP_DIR)
@@ -761,7 +760,7 @@ def parse_raw_nodes(content):
                 is_socks = "socks" in parsed.scheme.lower()
                 p = parsed.port or (1080 if is_socks else 443 if parsed.scheme == 'https' else 80)
                 tag = f"{parsed.scheme.upper()} {h}:{p}"
-
+                
                 if not h or is_dummy_placeholder(tag, h, p):
                     continue
 

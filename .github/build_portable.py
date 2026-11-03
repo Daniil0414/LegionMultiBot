@@ -17,6 +17,9 @@ import urllib.error
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app_version import APP_VERSION
+from package_app import build_package
 FORBIDDEN = {'accounts.json', 'userscript_config.json', 'launcher_config.json',
              'vpn_config.json', 'userscript-private.json', 'Cookies', 'Login Data',
              'History', 'Local State', '.vpn_runtime', '.git'}
@@ -57,6 +60,9 @@ def copy_member(archive, name, target):
 def build(cache, output):
     if os.name != 'nt':
         raise RuntimeError('The portable Windows application must be built on Windows.')
+    release_tag = os.environ.get('GITHUB_REF', '')
+    if release_tag.startswith('refs/tags/') and release_tag != 'refs/tags/v' + APP_VERSION:
+        raise ValueError('Release tag must match APP_VERSION: v' + APP_VERSION)
     lock = json.loads((ROOT / '.github' / 'portable-components.json').read_text())
     cache.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
@@ -139,8 +145,15 @@ def build(cache, output):
         with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             for path in paths:
                 archive.write(path, 'LegionMultiBot/' + path.relative_to(distribution).as_posix())
-        digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-        (output / 'SHA256SUMS.txt').write_text(digest + '  ' + archive_path.name + '\n', encoding='ascii')
+        source_archive = build_package(ROOT, output / 'legion-multibot.zip')
+        checksums = []
+        for artifact in (archive_path, source_archive):
+            digest = hashlib.sha256()
+            with artifact.open('rb') as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            checksums.append(digest.hexdigest() + '  ' + artifact.name)
+        (output / 'SHA256SUMS.txt').write_text('\n'.join(checksums) + '\n', encoding='ascii')
         print(json.dumps({'portable_release': str(archive_path), 'bytes': archive_path.stat().st_size,
                           'self_test': result, 'private_files': 0}), flush=True)
 

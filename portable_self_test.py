@@ -16,6 +16,9 @@ def check():
     from chrome_mobile import ProtocolError
     from userscripts import UserscriptManager
     from unittest.mock import patch
+    from app_update_ui import StartupUpdater
+    from app_updater import Release, installation_target
+    from app_version import APP_VERSION
 
     assert CHROME_EXE == bundled_browser()
     for name in (bundled_browser(), bundled_node(), bundled_xray()):
@@ -24,6 +27,12 @@ def check():
     root = tk.Tk()
     root.withdraw()
     root.update()
+    assert installation_target(APP_DIR) == APP_DIR.parent
+    updater = StartupUpdater(root, APP_DIR, lambda: None)
+    updater._show_offer(Release('9.9.9', 'https://github.com/Daniil0414/LegionMultiBot'))
+    assert updater.update_button.cget('text') == 'Обновить и перезапустить'
+    assert updater.skip_button.cget('text') == 'Не обновлять'
+    updater._skip()
     root.destroy()
     node = subprocess.run([bundled_node(), '--version'], capture_output=True, text=True, timeout=20, creationflags=0x08000000)
     xray = subprocess.run([bundled_xray(), 'version'], capture_output=True, text=True, timeout=20, creationflags=0x08000000)
@@ -78,7 +87,7 @@ def check():
             profiles.shutdown()
             server.shutdown()
             server.server_close()
-    return {'ok': True, 'tk': True, 'node': node.stdout.strip(),
+    return {'ok': True, 'tk': True, 'app_version': APP_VERSION, 'updater_prompt': True, 'node': node.stdout.strip(),
             'xray': xray.stdout.splitlines()[0], 'bundled_browser': True,
             'script_auto_install': True, 'offline_script_cache': True,
             'local_browser_page': True, 'uses_system_python_or_node': False}

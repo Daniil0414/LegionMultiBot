@@ -3,6 +3,7 @@ import functools
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import threading
