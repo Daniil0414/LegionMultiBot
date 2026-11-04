@@ -1327,7 +1327,7 @@ class VpnDispatcher:
                     self._terminate(self.xray_proc)
                     self.xray_proc = None
 
-    def filter_alive_nodes(self, timeout=3.0, max_workers=8, progress_callback=None):
+    def filter_alive_nodes(self, timeout=4.0, max_workers=16, progress_callback=None):
         epoch = self._filter_epoch
         with self._filter_lock:
             with self.lock:

@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import json
 import os
+from pathlib import Path
 import re
 import socket
 import struct
@@ -197,11 +198,33 @@ def launch_browser(arguments):
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
     job, process, stream = BrowserJob(), None, None
+    user_data_dir = None
+    for arg in arguments:
+        if isinstance(arg, str) and arg.startswith('--user-data-dir='):
+            user_data_dir = arg.split('=', 1)[1]
+            break
+    stderr_file = None
+    if user_data_dir:
+        try:
+            log_path = Path(user_data_dir) / 'chrome_stderr.log'
+            if log_path.is_file() and log_path.stat().st_size > 5 * 1024 * 1024:
+                log_path.write_bytes(b'')
+            stderr_file = open(log_path, 'a', encoding='utf-8', errors='replace')
+        except OSError:
+            stderr_file = None
+    stderr_target = stderr_file if stderr_file is not None else subprocess.DEVNULL
     try:
-        process = subprocess.Popen([*arguments, '--remote-debugging-address=127.0.0.1',
-                                    f'--remote-debugging-port={port}'],
-                                   close_fds=True, creationflags=4, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            process = subprocess.Popen([*arguments, '--remote-debugging-address=127.0.0.1',
+                                        f'--remote-debugging-port={port}'],
+                                       close_fds=True, creationflags=4, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.DEVNULL, stderr=stderr_target)
+        finally:
+            if stderr_file is not None:
+                try:
+                    stderr_file.close()
+                except OSError:
+                    pass
         job.attach(process)
         resume_browser(process)
         deadline = time.monotonic() + 12

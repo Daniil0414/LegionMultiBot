@@ -144,3 +144,35 @@ class DockingUpdateTests(unittest.TestCase):
             app.HighQualityMultiBoxerApp.dock_hwnd_to_slot(launcher, 101, 0)
         self.assertEqual(move.call_count, expected_moves)
         launcher.after.assert_not_called()
+
+    def test_crashed_browser_window_is_automatically_recovered(self):
+        label = Mock()
+        launcher = SimpleNamespace(
+            _closing_browsers=False, is_launching=False,
+            current_page=1, page_size=12,
+            bot_profiles=[dict(key='bot_1', name='Bot 1', gaia='')],
+            slot_cards=[dict(bot_lbl=label)],
+            profile_hwnds={'bot_1': 999},
+            _docked_hwnds={999},
+            browser_sessions={'bot_1': dict(pid=1234, identity={'pid': 1234, 'create_time': 100})},
+            slot_urls={'bot_1': 'game'},
+            status_lbl=Mock(),
+            browser_profiles=Mock(generation=1),
+            run_launch_single=Mock(),
+            _mark_slot_browser_failed=Mock()
+        )
+        with (patch.object(app.user32, 'IsWindow', return_value=False),
+              patch.object(app, 'process_identity', return_value=None),
+              patch.object(app.threading, 'Thread') as thread):
+            app.HighQualityMultiBoxerApp._check_active_slots_health(launcher)
+            self.assertNotIn('bot_1', launcher.profile_hwnds)
+            self.assertNotIn('bot_1', launcher.browser_sessions)
+            self.assertNotIn(999, launcher._docked_hwnds)
+            self.assertTrue(thread.called)
+            worker = thread.call_args.kwargs['target']
+            worker()
+            launcher.run_launch_single.assert_called_once_with(
+                'bot_1', 0, proxy_slot_idx=0,
+                target_url='https://play.multidonate.ru/c/zakvielchannel/',
+                generation=1
+            )

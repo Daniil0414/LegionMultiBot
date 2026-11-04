@@ -563,7 +563,8 @@ class ProxyManager:
             remaining.sort(key=lambda candidate: (
                 health is not None and candidate not in health,
                 self._route_load(state, owner, endpoint_for(candidate)),
-                self._route_key(endpoint_for(candidate)) != assigned))
+                self._route_key(endpoint_for(candidate)) != assigned,
+                candidate != index))
             candidate = remaining[0]
             endpoint = endpoint_for(candidate)
             load = self._route_load(state, owner, endpoint)

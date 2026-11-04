@@ -228,6 +228,15 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(login, playing)
         self.assertEqual(len(self.manager._isolation_snapshot()['profiles']), 1)
 
+    def test_adding_new_account_gets_its_own_free_server_without_conflicting(self):
+        self.dispatcher.nodes += vpn.parse_raw_nodes('socks5://c.invalid:1080')
+        self.claim('bot_1', 0)
+        self.claim('bot_2', 1)
+        with patch('proxy_manager.fetch_proxy_ip', return_value='8.8.8.8'):
+            new_login_proxy = self.manager.get_working_proxy_for_slot(2, profile_key='bot_3')
+        self.assertEqual(new_login_proxy, 'socks5://127.0.0.1:10812')
+        self.assertEqual(len(self.manager._isolation_snapshot()['profiles']), 3)
+
     def test_standby_chooses_the_less_used_of_two_busy_servers(self):
         self.dispatcher.nodes += vpn.parse_raw_nodes('socks5://c.invalid:1080')
         self.claim('b1', 1)

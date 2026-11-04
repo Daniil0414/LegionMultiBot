@@ -607,6 +607,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
             pass
 
         self._check_browser_routes_async()
+        self._check_active_slots_health()
         if schedule_next:
             if hasattr(self, "_vpn_periodic_timer") and self._vpn_periodic_timer:
                 try:
@@ -655,6 +656,67 @@ class HighQualityMultiBoxerApp(tk.Tk):
             except RuntimeError:
                 pass
         threading.Thread(target=worker, daemon=True).start()
+
+    def _check_active_slots_health(self):
+        """Monitors active docked browser windows and automatically recovers crashed sessions."""
+        if self._closing_browsers or self.is_launching:
+            return
+
+        start_idx = (self.current_page - 1) * self.page_size
+        items = self.bot_profiles[start_idx:start_idx + self.page_size]
+        curr_keys = {p["key"]: (slot_i, p) for slot_i, p in enumerate(items)}
+
+        now = time.monotonic()
+        if not hasattr(self, '_recovery_timestamps'):
+            self._recovery_timestamps = {}
+        if not hasattr(self, '_recovering_keys'):
+            self._recovering_keys = set()
+
+        for key, session in list(self.browser_sessions.items()):
+            if key in self._recovering_keys:
+                continue
+            hwnd = self.profile_hwnds.get(key)
+            is_window_alive = bool(hwnd and user32.IsWindow(hwnd))
+            pid = session.get('pid') or (session.get('identity', {}).get('pid') if isinstance(session.get('identity'), dict) else None)
+            is_proc_alive = bool(pid and process_identity(pid) == session.get('identity'))
+
+            if not is_window_alive or not is_proc_alive:
+                self.profile_hwnds.pop(key, None)
+                self.browser_sessions.pop(key, None)
+                if hwnd:
+                    self._docked_hwnds.discard(hwnd)
+
+                if key in curr_keys:
+                    slot_idx, p = curr_keys[key]
+                    history = [t for t in self._recovery_timestamps.get(key, []) if now - t < 300]
+                    if len(history) < 3:
+                        history.append(now)
+                        self._recovery_timestamps[key] = history
+                        self._recovering_keys.add(key)
+                        p_name = p['gaia'] or p['name']
+                        self.status_lbl.config(text=f"Восстановление окна Chrome: {p_name}...")
+                        if slot_idx < len(self.slot_cards):
+                            self.slot_cards[slot_idx]["bot_lbl"].config(
+                                text=f"• {p_name} [Восстановление...]", fg="#fbbf24"
+                            )
+                        cur_mode = self.slot_urls.get(key, "game")
+                        target_url = "https://2ip.io" if cur_mode == "2ip" else "https://play.multidonate.ru/c/zakvielchannel/"
+                        global_idx = start_idx + slot_idx
+
+                        def _recover_worker(k=key, s_idx=slot_idx, g_idx=global_idx, t_url=target_url):
+                            try:
+                                self.run_launch_single(
+                                    k, s_idx, proxy_slot_idx=g_idx, target_url=t_url,
+                                    generation=self.browser_profiles.generation
+                                )
+                            finally:
+                                self._recovering_keys.discard(k)
+
+                        threading.Thread(target=_recover_worker, daemon=True).start()
+                    else:
+                        self._mark_slot_browser_failed(
+                            slot_idx, key, "Окно браузера аварийно завершилось. Нажмите ↻ для повторного запуска."
+                        )
 
     def apply_clip_children_styles(self):
         """Enforces WS_CLIPCHILDREN and WS_CLIPSIBLINGS on all parent Tkinter windows
@@ -1303,7 +1365,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
             pool_text.insert(tk.END, "🔍 Проверка доступности серверов без изменения маршрутов окон...\n")
             def _worker():
                 alive, total = vd.filter_alive_nodes(
-                    timeout=2.5,
+                    timeout=4.0,
+                    max_workers=16,
                     progress_callback=lambda m: self.after(0, lambda msg=m: [
                         pool_text.insert(tk.END, msg + "\n"),
                         pool_text.see(tk.END)
@@ -2186,7 +2249,9 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     "--disable-sync",
                     "--no-pings",
                     "--no-first-run",
-                    "--no-default-browser-check"
+                    "--no-default-browser-check",
+                    "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication",
+                    "--disable-gpu-watchdog"
                 ]
                 if muted:
                     args.append("--mute-audio")
@@ -2709,6 +2774,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
             "--disable-dev-shm-usage",
             "--disk-cache-size=10485760",
             "--media-cache-size=10485760",
+            "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication",
+            "--disable-gpu-watchdog",
         ]
 
         if self.mute_var.get():
@@ -2816,7 +2883,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self.use_vpn and vd.nodes and not vd.alive_nodes:
             self.after(0, lambda: self.status_lbl.config(text="🔍 Быстрый отсев нерабочих серверов VPN перед запуском..."))
             vd.filter_alive_nodes(
-                timeout=2.5,
+                timeout=4.0,
+                max_workers=16,
                 progress_callback=lambda m: self.after(0, lambda msg=m: self.status_lbl.config(text=msg))
             )
             self.after(0, self.update_all_slot_proxy_badges)
@@ -2887,7 +2955,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self.use_vpn and vd.nodes and not vd.alive_nodes:
             self.after(0, lambda: self.status_lbl.config(text="🔍 Быстрый отсев нерабочих серверов VPN перед запуском..."))
             vd.filter_alive_nodes(
-                timeout=2.5,
+                timeout=4.0,
+                max_workers=16,
                 progress_callback=lambda m: self.after(0, lambda msg=m: self.status_lbl.config(text=msg))
             )
             self.after(0, self.update_all_slot_proxy_badges)

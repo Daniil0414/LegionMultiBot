@@ -295,8 +295,23 @@ class BrowserProfiles:
                                            emulate_mobile=self.emulate_mobile)
                 controller.set_userscript(script)
                 try:
+                    stability_features = {'TreesInViz', 'TreeAnimationsInViz', 'AutofillServerCommunication'}
+                    stability_args = ['--disable-gpu-watchdog']
+                    merged_cleaned = []
+                    has_disable_features = False
+                    for arg in cleaned:
+                        if arg.startswith('--disable-features='):
+                            existing = set(arg.split('=', 1)[1].split(',')) if len(arg.split('=', 1)) > 1 and arg.split('=', 1)[1] else set()
+                            combined = existing | stability_features
+                            merged_cleaned.append(f"--disable-features={','.join(sorted(combined))}")
+                            has_disable_features = True
+                        else:
+                            merged_cleaned.append(arg)
+                    if not has_disable_features:
+                        merged_cleaned.append(f"--disable-features={','.join(sorted(stability_features))}")
                     process = controller.start(
-                        [executable, f'--user-data-dir={directory}', '--disable-extensions', *required, *cleaned])
+                        [executable, f'--user-data-dir={directory}', '--disable-extensions',
+                         *stability_args, *required, *merged_cleaned])
                     identity = process_identity(process.pid)
                     if not identity:
                         raise RuntimeError('Unable to verify the launched browser process')
