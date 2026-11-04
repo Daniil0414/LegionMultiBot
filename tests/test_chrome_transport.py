@@ -90,3 +90,59 @@ class TransportTests(unittest.TestCase):
                 ct.launch_browser(['chrome.exe'])
             factory.return_value.close.assert_called_once()
             process.wait.assert_called_once()
+
+    def test_slow_control_endpoint_is_retried_without_restarting_browser(self):
+        process = types.SimpleNamespace(pid=42, poll=Mock(return_value=None), wait=Mock())
+        first, second, stream = Mock(), Mock(), Mock()
+        first.getresponse.side_effect = TimeoutError('fixture endpoint warming up')
+        second.getresponse.return_value = types.SimpleNamespace(
+            status=200, read=Mock(return_value=b'{"webSocketDebuggerUrl":"ws://127.0.0.1:12345/devtools/browser/abc"}'))
+        with (patch.object(ct, 'BrowserJob') as factory,
+              patch.object(ct.subprocess, 'Popen', return_value=process) as spawn,
+              patch.object(ct, 'resume_browser'),
+              patch.object(ct, 'verify_listener', return_value=True) as verify,
+              patch.object(ct.http.client, 'HTTPConnection', side_effect=[first, second]),
+              patch.object(ct.WebSocketStream, 'connect', return_value=stream),
+              patch.object(ct.time, 'sleep')):
+            self.assertEqual(ct.launch_browser(['chrome.exe']), (process, stream, factory.return_value))
+        spawn.assert_called_once()
+        self.assertEqual(verify.call_count, 3)
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+        factory.return_value.close.assert_not_called()
+        process.wait.assert_not_called()
+
+    def test_unready_control_endpoint_stops_at_startup_deadline(self):
+        process = types.SimpleNamespace(pid=42, poll=Mock(return_value=None), wait=Mock())
+        connection = Mock()
+        connection.getresponse.side_effect = TimeoutError('fixture endpoint warming up')
+        with (patch.object(ct, 'BrowserJob') as factory,
+              patch.object(ct.subprocess, 'Popen', return_value=process),
+              patch.object(ct, 'resume_browser'),
+              patch.object(ct, 'verify_listener', return_value=True),
+              patch.object(ct.http.client, 'HTTPConnection', return_value=connection),
+              patch.object(ct.time, 'monotonic', side_effect=[0, 0, 13]),
+              patch.object(ct.time, 'sleep')):
+            with self.assertRaisesRegex(OSError, 'Timed out waiting for the Chrome control endpoint') as raised:
+                ct.launch_browser(['chrome.exe'])
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+        connection.close.assert_called_once()
+        factory.return_value.close.assert_called_once()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_control_endpoint_retry_rejects_a_changed_listener_owner(self):
+        process = types.SimpleNamespace(pid=42, poll=Mock(return_value=None), wait=Mock())
+        connection = Mock()
+        connection.getresponse.side_effect = TimeoutError('fixture endpoint warming up')
+        with (patch.object(ct, 'BrowserJob') as factory,
+              patch.object(ct.subprocess, 'Popen', return_value=process),
+              patch.object(ct, 'resume_browser'),
+              patch.object(ct, 'verify_listener', side_effect=[True, OSError('fixture wrong owner')]),
+              patch.object(ct.http.client, 'HTTPConnection', return_value=connection) as http,
+              patch.object(ct.time, 'sleep')):
+            with self.assertRaisesRegex(OSError, 'fixture wrong owner'):
+                ct.launch_browser(['chrome.exe'])
+        http.assert_called_once()
+        connection.close.assert_called_once()
+        factory.return_value.close.assert_called_once()
+        process.wait.assert_called_once()

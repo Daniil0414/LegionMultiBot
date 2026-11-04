@@ -205,6 +205,7 @@ def launch_browser(arguments):
         job.attach(process)
         resume_browser(process)
         deadline = time.monotonic() + 12
+        last_error = None
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise OSError('Chrome exited before its control endpoint was ready')
@@ -217,6 +218,12 @@ def launch_browser(arguments):
                     if response.status != 200 or len(body) > 65536:
                         raise OSError('Invalid Chrome control endpoint response')
                     endpoint = json.loads(body)['webSocketDebuggerUrl']
+                except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+                    # The owned listener can open before Chrome serves DevTools.
+                    # Retry within the startup deadline, rechecking its owner.
+                    last_error = exc
+                    time.sleep(.04)
+                    continue
                 finally:
                     connection.close()
                 stream = WebSocketStream.connect(endpoint, port)
@@ -224,7 +231,7 @@ def launch_browser(arguments):
                     raise OSError('Chrome listener disappeared during connection')
                 return process, stream, job
             time.sleep(.04)
-        raise OSError('Timed out waiting for the Chrome control endpoint')
+        raise OSError('Timed out waiting for the Chrome control endpoint') from last_error
     except BaseException:
         if stream:
             stream.close()
