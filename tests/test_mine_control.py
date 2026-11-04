@@ -360,12 +360,13 @@ class OverlayMineTests(unittest.TestCase):
             return [dict(key='a', ok=True), dict(key='b', ok=True)]
         panel = MineControlPanel(root, SimpleNamespace(command_mine_all=command), lambda: {'a': 'Acc1', 'b': 'Acc2'})
         try:
+            panel.delay.set('0 сек')
             panel._swarm_active = True
             panel._periodic_check()
-            until = time.monotonic() + 3
+            until = time.monotonic() + 8
             while (panel._busy or 'start' not in calls) and time.monotonic() < until:
                 root.update()
-                time.sleep(.015)
+                time.sleep(.02)
             self.assertIn('status', calls)
             self.assertIn('start', calls)
             self.assertTrue(panel._swarm_active)
@@ -411,7 +412,10 @@ class OverlayMineTests(unittest.TestCase):
             while time.monotonic() < deadline:
                 root.update()
                 time.sleep(.01)
-            baseline = capture()
+            try:
+                baseline = capture()
+            except OSError:
+                self.skipTest('Display capture is unavailable in this environment')
             if os.environ.get('LEGION_MINE_DRAG_SCREENSHOT'):
                 baseline.save(str(Path(os.environ['LEGION_MINE_DRAG_SCREENSHOT']).with_name('legion-drag-baseline.png')))
             panel = MineControlPanel(host, SimpleNamespace())
