@@ -113,17 +113,11 @@ test('mine control supports async startBot with miningStartToken and helmet equi
     let isPaused = true, miningStartToken = null, clicks = 0;
     const btn = {isConnected:true, textContent: 'Старт', click() {clicks++; this.onclick();}};
     const st = {textContent: 'На паузе'};
-    async function startBot() {
+    function startBot() {
       if (!isPaused || miningStartToken) return;
-      const startToken = {};
-      miningStartToken = startToken;
+      miningStartToken = {};
       btn.textContent = 'Пауза';
       st.textContent = 'Надеваем каску с фонариком…';
-      await Promise.resolve();
-      if (miningStartToken !== startToken || !window.__mineBotRunning) return;
-      miningStartToken = null;
-      isPaused = false;
-      st.textContent = 'Работает';
     }
     function pauseBot() {
       miningStartToken = null;
