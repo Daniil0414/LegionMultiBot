@@ -70,6 +70,8 @@ test('mine control clicks the actual toggle only when a state change is needed',
     window.readFixture = () => ({isPaused, clicks});
     window.closeFixture = () => { window.__mineBotRunning = false; };
   })();`, {registerMineControl: handler => { command = handler; }});
+  assert.equal(command('status').state, 'paused');
+  assert.equal(page.readFixture().clicks, 0);
   assert.equal(command('start').state, 'running');
   assert.equal(command('start').changed, false);
   assert.equal(page.readFixture().clicks, 1);
@@ -94,6 +96,8 @@ test('mine control supports compound toggle conditions like isPaused && !miningS
     window.closeFixture = () => { window.__mineBotRunning = false; };
   })();`;
   const page = execute(fixture, {registerMineControl: handler => { command = handler; }});
+  assert.equal(command('status').state, 'paused');
+  assert.equal(page.readFixture().clicks, 0);
   assert.equal(command('start').state, 'running');
   assert.equal(command('start').changed, false);
   assert.equal(page.readFixture().clicks, 1);

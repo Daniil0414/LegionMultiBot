@@ -222,10 +222,10 @@ class MobileBrowser:
                 response = self.connection.call('Runtime.evaluate', dict(expression=expression,
                     contextId=context, awaitPromise=True, returnByValue=True), session)
                 value = response.get('result', {}).get('value')
-                expected = 'running' if action == 'start' else 'paused'
+                expected = 'running' if action == 'start' else ('paused' if action == 'pause' else None)
                 if response.get('exceptionDetails') or not isinstance(value, dict):
                     value = dict(ok=False, error='unavailable')
-                elif value.get('ok') and value.get('state') != expected:
+                elif value.get('ok') and expected is not None and value.get('state') != expected:
                     value = dict(ok=False, error='not_confirmed')
                 results.append(dict(value, target=target))
             except (ProtocolError, KeyError):

@@ -107,7 +107,7 @@ class PrivateScriptStore:
 
 def mine_command_source(config, action):
     """Request one idempotent click in the supported script, with an acknowledgement."""
-    if action not in ('start', 'pause'):
+    if action not in ('start', 'pause', 'status'):
         raise ValueError('Unknown mine command')
     import secrets
     packet = dict(id=secrets.token_hex(16), action=action)

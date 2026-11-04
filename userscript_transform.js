@@ -47,6 +47,7 @@ function transform(source) {
       return `${emit(node.expression)};\n${name}.registerMineControl(action => {
         if (${name}.state(window).__mineBotRunning !== true || typeof isPaused !== 'boolean' ||
             !btn.isConnected || btn.disabled || typeof btn.onclick !== 'function') throw new Error('unavailable');
+        if (action === 'status') return {state: isPaused ? 'paused' : 'running', changed: false};
         const paused = action === 'pause', previous = isPaused;
         if (isPaused !== paused) btn.click();
         if (isPaused !== paused) throw new Error('not_confirmed');

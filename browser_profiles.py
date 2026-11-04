@@ -126,7 +126,7 @@ class BrowserProfiles:
 
     def command_mine_all(self, action, requested_at=None, delay_range=(0, 0), profile_order=None, progress=None):
         """Visit each open page in account order, with interruptible delays."""
-        if action not in ('start', 'pause'):
+        if action not in ('start', 'pause', 'status'):
             raise ValueError('Unknown mine command')
         delay_range = tuple(delay_range)
         if delay_range not in ((0, 0), (1, 5), (1, 10)) or any(type(value) is not int for value in delay_range):

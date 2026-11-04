@@ -36,6 +36,8 @@ class MineControlPanel(tk.Frame):
         self._progress = queue.SimpleQueue()
         self._operation = 0
         self._busy = False
+        self._swarm_active = False
+        self._periodic_timer = None
         self._poll_id = None
         self._layout_id = None
         self._paint_id = None
@@ -74,6 +76,14 @@ class MineControlPanel(tk.Frame):
         self.delay_picker = ttk.Combobox(delay_row, textvariable=self.delay, values=list(DELAY_OPTIONS),
                                           state='readonly', width=10)
         self.delay_picker.pack(side='right')
+        self.auto_watch = tk.BooleanVar(self, True)
+        self.auto_watch_check = tk.Checkbutton(
+            body, text='Проверять статус раз в минуту (автоподхват)',
+            variable=self.auto_watch, command=self._on_auto_watch_toggled,
+            bg='#111827', fg='#cbd5e1', selectcolor='#1e293b',
+            activebackground='#111827', activeforeground='#f8fafc',
+            font=('Segoe UI', 9), anchor='w', cursor='hand2')
+        self.auto_watch_check.pack(fill='x', pady=(0, 10))
         self.toggle_button = tk.Button(body, command=lambda: self.submit(self._next_action),
             fg='white', activeforeground='white', font=('Segoe UI', 11, 'bold'),
             relief='flat', cursor='hand2', padx=12, pady=10)
@@ -198,9 +208,14 @@ class MineControlPanel(tk.Frame):
         if old is not None:
             self._queue_repaint(old, old)
 
-    def submit(self, action):
+    def submit(self, action, auto=False):
         if action not in ('start', 'pause'):
             raise ValueError('Unknown mine command')
+        if action == 'start':
+            self._swarm_active = True
+        else:
+            self._swarm_active = False
+            self._cancel_periodic_check()
         self._operation += 1
         operation, requested_at = self._operation, time.perf_counter_ns()
         cancel = getattr(self.profiles, 'cancel_mine_commands', None)
@@ -214,8 +229,11 @@ class MineControlPanel(tk.Frame):
         self._set_action('pause', enabled=action == 'start')
         self.details.pack_forget()
         self._queue_layout()
-        self.status.set('Запускаю автошахту во всех окнах…' if action == 'start'
-                        else 'Ставлю автошахту всех окон на паузу…')
+        if auto:
+            self.status.set('Автоподхват роя: запускаю автошахту…')
+        else:
+            self.status.set('Запускаю автошахту во всех окнах…' if action == 'start'
+                            else 'Ставлю автошахту всех окон на паузу…')
 
         def work():
             try:
@@ -247,6 +265,24 @@ class MineControlPanel(tk.Frame):
                 break
             if operation != self._operation:
                 continue
+            if action == 'periodic_status':
+                if not self._swarm_active or not self.auto_watch.get() or self._busy:
+                    continue
+                paused = [r for r in results if r.get('ok') and r.get('state') == 'paused']
+                running = [r for r in results if r.get('ok') and r.get('state') == 'running']
+                has_not_ready = any(r.get('error') == 'not_ready' for r in results)
+                if paused:
+                    names = self.account_names()
+                    paused_names = ", ".join(names.get(p.get('key'), p.get('key', 'Окно')) for p in paused)
+                    logging.getLogger('legion.launch').info(
+                        'Auto-swarm detected %d paused window(s) (%s), relaunching into mine...',
+                        len(paused), paused_names)
+                    self.submit('start', auto=True)
+                else:
+                    if running:
+                        self.status.set(f"Рой активен: {len(running)} из {len(running)} окон копают. Автопроверка: раз в мин.")
+                    self._schedule_periodic_check(15000 if has_not_ready else 60000)
+                continue
             self._busy = False
             self.delay_picker.configure(state='readonly')
             if error:
@@ -255,6 +291,8 @@ class MineControlPanel(tk.Frame):
                 self.status.set(error)
             elif not results:
                 self._set_action('start')
+                self._swarm_active = False
+                self._cancel_periodic_check()
                 self.status.set('Нет открытых окон. Сначала запустите аккаунты.')
             else:
                 successes = sum(result.get('ok') is True for result in results)
@@ -262,7 +300,15 @@ class MineControlPanel(tk.Frame):
                 if action == 'start':
                     uncertain = any(item.get('error') in ('unavailable', 'not_confirmed') for item in failures)
                     self._set_action('pause' if successes or uncertain else 'start')
+                    if successes or uncertain:
+                        self._swarm_active = True
+                        self._schedule_periodic_check(60000)
+                    else:
+                        self._swarm_active = False
+                        self._cancel_periodic_check()
                 else:
+                    self._swarm_active = False
+                    self._cancel_periodic_check()
                     self._set_action('pause' if failures else 'start')
                 state = 'Копание включено' if action == 'start' else 'Автошахта на паузе'
                 self.status.set(f'{state}: {successes} из {len(results)} окон.'
@@ -280,7 +326,43 @@ class MineControlPanel(tk.Frame):
         if self._busy:
             self._poll_id = self.after(80, self._poll)
 
+    def _cancel_periodic_check(self):
+        if self._periodic_timer is not None:
+            self.after_cancel(self._periodic_timer)
+            self._periodic_timer = None
+
+    def _schedule_periodic_check(self, delay_ms=60000):
+        self._cancel_periodic_check()
+        if self._swarm_active and self.auto_watch.get():
+            self._periodic_timer = self.after(delay_ms, self._periodic_check)
+
+    def _periodic_check(self):
+        self._periodic_timer = None
+        if not self._swarm_active or not self.auto_watch.get() or self._busy:
+            if self._swarm_active and self.auto_watch.get():
+                self._schedule_periodic_check(10000)
+            return
+        op = self._operation
+
+        def work():
+            try:
+                results = self.profiles.command_mine_all('status', delay_range=(0, 0))
+                self._messages.put((op, 'periodic_status', results, None))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True, name='swarm-mine-status').start()
+        if self._poll_id is None:
+            self._poll_id = self.after(80, self._poll)
+
+    def _on_auto_watch_toggled(self):
+        if self._swarm_active and self.auto_watch.get():
+            self._schedule_periodic_check(2000)
+        elif not self.auto_watch.get():
+            self._cancel_periodic_check()
+
     def destroy(self):
+        self._cancel_periodic_check()
         old = self._bounds() if self.winfo_ismapped() else None
         self._end_drag()
         self.master.unbind('<Configure>', self._host_binding)

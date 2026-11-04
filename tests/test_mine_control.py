@@ -47,6 +47,16 @@ class BatchMineTests(unittest.TestCase):
                                mine_targets=lambda: ['page'], close=lambda: None,
                                connection=SimpleNamespace(closed=threading.Event(), job=None))
 
+    def test_status_command_queries_without_delays(self):
+        called = []
+        def send(action):
+            called.append(action)
+            return [dict(ok=True, state='running')]
+        self.profiles._controllers = {'page-1': self.controller(send)}
+        results = self.profiles.command_mine_all('status')
+        self.assertEqual(called, ['status'])
+        self.assertEqual(results, [dict(key='page-1', target='page', ok=True, state='running')])
+
     def test_all_open_profiles_are_addressed_even_if_one_fails(self):
         called = []
         def success(key):
@@ -327,8 +337,41 @@ class OverlayMineTests(unittest.TestCase):
                     self.assertEqual(calls[-1][0], action)
                     self.assertEqual(calls[-1][1]['delay_range'], bounds)
                     self.assertEqual(calls[-1][1]['profile_order'], ['a', 'b'])
+                    if action == 'start':
+                        self.assertTrue(panel._swarm_active)
+                        self.assertIsNotNone(panel._periodic_timer)
+                    else:
+                        self.assertFalse(panel._swarm_active)
+                        self.assertIsNone(panel._periodic_timer)
         finally:
             root.destroy()
+
+    def test_periodic_check_auto_recovers_paused_windows(self):
+        import tkinter as tk
+        from mine_control_ui import MineControlPanel
+        root = tk.Tk()
+        root.geometry('700x480+40+40')
+        root.update()
+        calls = []
+        def command(action, **kwargs):
+            calls.append(action)
+            if action == 'status':
+                return [dict(key='a', ok=True, state='running'), dict(key='b', ok=True, state='paused')]
+            return [dict(key='a', ok=True), dict(key='b', ok=True)]
+        panel = MineControlPanel(root, SimpleNamespace(command_mine_all=command), lambda: {'a': 'Acc1', 'b': 'Acc2'})
+        try:
+            panel._swarm_active = True
+            panel._periodic_check()
+            until = time.monotonic() + 3
+            while (panel._busy or 'start' not in calls) and time.monotonic() < until:
+                root.update()
+                time.sleep(.015)
+            self.assertIn('status', calls)
+            self.assertIn('start', calls)
+            self.assertTrue(panel._swarm_active)
+        finally:
+            root.destroy()
+
 
     def test_drag_repaints_exposed_slots_without_leaving_panel_pixels(self):
         import tkinter as tk
@@ -401,6 +444,7 @@ class OverlayMineTests(unittest.TestCase):
             self.assertIsNone(ImageChops.difference(baseline, capture()).getbbox(), 'Hiding the panel left stale pixels')
         finally:
             root.destroy()
+
 
     def test_stop_remains_available_and_old_start_result_cannot_replace_pause_status(self):
         import tkinter as tk
@@ -522,3 +566,4 @@ class OverlayMineTests(unittest.TestCase):
             self.assertTrue(panel.winfo_ismapped())
         finally:
             root.destroy()
+

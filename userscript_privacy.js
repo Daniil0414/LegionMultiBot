@@ -42,6 +42,7 @@
     const st = (shadow && shadowQuery(shadow, '#b-st')) || nativeQuery('#b-st') || (document.querySelector && document.querySelector('#b-st'));
     const isPaused = st ? (st.textContent.includes('пауз') || !st.textContent.includes('работ'))
                         : (btn.textContent.includes('Старт') || !btn.textContent.includes('Пауз'));
+    if (action === 'status') return { state: isPaused ? 'paused' : 'running', changed: false };
     const wantsPause = action === 'pause';
     const previous = isPaused;
     if (isPaused !== wantsPause) {
@@ -55,7 +56,7 @@
     if (typeof event.detail !== 'string' || event.detail.length > 1024) return;
     let packet;
     try { packet = parse(event.detail); } catch (_) { return; }
-    if (!packet || typeof packet.id !== 'string' || !['start', 'pause'].includes(packet.action)) return;
+    if (!packet || typeof packet.id !== 'string' || !['start', 'pause', 'status'].includes(packet.action)) return;
     let result;
     try {
       if (typeof mineControl === 'function') {
