@@ -1,5 +1,6 @@
 """Verified VPN route selection shared by every browser launcher."""
 import atexit
+from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
@@ -7,11 +8,13 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 import urllib.parse
+import uuid
 from proxy_network import NETWORK_LOG, fetch_proxy_ip
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, parse_raw_nodes, _node_identity
-from vpn_runtime import atomic_json, runtime_lock
-from vpn_failover import FailoverProxy
+from vpn_runtime import atomic_json, runtime_lock, process_identity, process_is_alive
+from vpn_failover import FailoverProxy, RouteSelectionChanged
 from app_paths import profile_directory
 
 
@@ -81,6 +84,11 @@ class ProxyManager:
         self._selected_routes = {}
         self._failover_routes = {}
         self._failover_status = {}
+        self._manager_token = uuid.uuid4().hex
+        self._process_identity = process_identity(os.getpid())
+        self._registered_owners = set()
+        self._profile_processes = {}
+        self._profile_launches = {}
         self._isolation_root = (Path(isolation_root) if isolation_root is not None
                                 else profile_directory())
         self._closed = threading.Event()
@@ -107,6 +115,11 @@ class ProxyManager:
                 gateway.close()
             except Exception as exc:
                 error = error or exc
+        for owner in list(getattr(self, '_registered_owners', ())):
+            try:
+                self._release_route(owner)
+            except Exception as exc:
+                error = error or exc
         with self._lock:
             try:
                 self.vpn_dispatcher.stop_xray()
@@ -118,6 +131,7 @@ class ProxyManager:
     def _monitor(self):
         while not self._closed.is_set():
             try:
+                self.release_closed_profiles()
                 self.ensure_core_running()
             except Exception:
                 pass
@@ -178,10 +192,15 @@ class ProxyManager:
         primary = self.get_working_proxy_for_slot(slot_idx, status_callback, profile_key, cancel_callback)
         if primary == 'ERROR_ALL_DOWN':
             return primary
+        failed_until, gateway_ref = {}, [None]
 
         def valid():
-            return (not self._closed.is_set() and
-                    tuple(_node_identity(n) for n in vd.get_nodes_snapshot()) == signature)
+            with self._lock:
+                gateway = gateway_ref[0]
+                current = self._failover_routes.get(owner)
+                return (not self._closed.is_set() and
+                        (gateway is None or (current is not None and current[1] is gateway)) and
+                        tuple(_node_identity(n) for n in vd.get_nodes_snapshot()) == signature)
 
         def endpoint_for(proxy):
             if not valid():
@@ -199,13 +218,31 @@ class ProxyManager:
             return endpoint
 
         def activate(proxy, ip):
+            with self._lock:
+                blocked = {item for item, until in failed_until.items() if until > time.monotonic()}
+            gateway, rebalance = gateway_ref[0], False
+            if gateway:
+                with gateway._lock:
+                    rebalance = gateway._active is None
+                    blocked.update(item for item, until in gateway._failed_until.items() if until > time.monotonic())
             with self._lock, vd.lock:
-                self._claim_route(owner, endpoint_for(proxy), ip)
+                alternatives = None
+                if rebalance:
+                    blocked_routes = {self._route_key(endpoint_for(item)) for item in blocked}
+                    endpoints = [_node_endpoint(node) for node in vd.get_nodes_snapshot()] or [('happ', self.default_happ_proxy)]
+                    candidates = [(i, endpoint) for i, endpoint in enumerate(endpoints)
+                                  if self._route_key(endpoint) not in blocked_routes]
+                    if vd._health_revision == vd._nodes_revision:
+                        healthy = [(i, endpoint) for i, endpoint in candidates if i in vd.alive_indices]
+                        candidates = healthy or candidates
+                    alternatives = [endpoint for _, endpoint in candidates]
+                if not self._claim_route(owner, endpoint_for(proxy), ip, alternatives=alternatives):
+                    raise RouteSelectionChanged('Загрузка VPN изменилась; выбирается менее занятый сервер.')
                 self._route_ips[proxy] = ip
 
         def verify(proxy, reserve=True):
             endpoint = endpoint_for(proxy)
-            # A busy endpoint cannot become this profile's exit, even if its IP changes.
+            # Validate registry integrity without reserving capacity for a probe.
             self._claim_route(owner, endpoint, reserve=False)
             ip = fetch_proxy_ip(proxy, timeout=2)
             with self._lock, vd.lock:
@@ -216,8 +253,6 @@ class ProxyManager:
                     self._route_ips[proxy] = ip
             return ip
 
-        cursor = [0]
-
         def choose_backup(excluded):
             if not valid():
                 return None
@@ -225,28 +260,29 @@ class ProxyManager:
             with vd.lock:
                 healthy = set(vd.alive_indices) if vd._health_revision == vd._nodes_revision else None
             state = self._isolation_snapshot()
-            indices = sorted(range(len(nodes)), key=lambda i: (
-                state['routes'].get(self._route_key(_node_endpoint(nodes[i]))) != owner,
-                healthy is not None and i not in healthy, i < 48, i))
-            if not nodes:
-                indices = [None]
+            excluded_routes = {self._route_key(endpoint_for(proxy)) for proxy in excluded}
+            indices = list(range(len(nodes))) if nodes else [None]
+            indices.sort(key=lambda i: (
+                healthy is not None and i not in healthy,
+                self._route_load(state, owner, _node_endpoint(nodes[i]) if i is not None else ('happ', self.default_happ_proxy)),
+                i is not None and i < 48, i if i is not None else -1))
             # Continue through the pool on subsequent passes; never stall health
             # monitoring behind a long serial scan of unavailable candidates.
             attempts = 0
-            for _ in indices:
-                index = indices[cursor[0] % len(indices)]
-                cursor[0] += 1
+            for index in indices:
                 proxy = self.default_happ_proxy if index is None else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + index}'
-                if proxy in excluded:
-                    continue
-                endpoint = endpoint_for(proxy)
-                if state['routes'].get(self._route_key(endpoint), owner) != owner:
+                with self._lock:
+                    cooling_down = failed_until.get(proxy, 0) > time.monotonic()
+                if (self._route_key(endpoint_for(proxy)) in excluded_routes or
+                        cooling_down):
                     continue
                 try:
                     # Probing a standby must not permanently consume its server/IP.
                     # Activation claims it atomically before any account traffic.
                     return proxy, verify(proxy, reserve=False)
                 except Exception:
+                    with self._lock:
+                        failed_until[proxy] = time.monotonic() + FailoverProxy.STANDBY_MAX_AGE
                     attempts += 1
                     if attempts >= 2:
                         break
@@ -254,6 +290,9 @@ class ProxyManager:
 
         def changed(proxy, status):
             with self._lock:
+                current = self._failover_routes.get(owner)
+                if gateway_ref[0] is not None and (current is None or current[1] is not gateway_ref[0]):
+                    return
                 previous = self._failover_status.get(proxy, {}).get('proxy')
                 self._failover_status[proxy] = dict(status)
                 if status['ip']:
@@ -263,6 +302,7 @@ class ProxyManager:
                         self._selected_routes[owner] = (signature, index)
                 else:
                     self._route_ips.pop(proxy, None)
+                    self._release_route(owner)
             if previous != status['proxy']:
                 NETWORK_LOG.info('VPN failover owner=%s gateway=%s upstream=%s previous=%s blocked=%s',
                                  owner, proxy, status['proxy'], previous, not bool(status['ip']))
@@ -277,6 +317,7 @@ class ProxyManager:
                 raise ProxySelectionCancelled('Запуск отменён')
             gateway = FailoverProxy(primary, self._route_ips[primary], verify, choose_backup, changed, valid,
                                     probe=lambda proxy: verify(proxy, reserve=False), activate=activate)
+            gateway_ref[0] = gateway
             self._failover_routes[owner] = (signature, gateway)
             return gateway.proxy
 
@@ -309,52 +350,169 @@ class ProxyManager:
         return hashlib.sha256(json.dumps(endpoint, ensure_ascii=True).encode()).hexdigest()
 
     def _read_isolation_state(self):
-        """Read and validate history while the caller holds the isolation file lock."""
-        registry = self._isolation_root / '.network-isolation.json'
+        """Read only current usage; legacy server/IP ownership is never consulted."""
+        registry = self._isolation_root / '.network-usage.json'
         try:
             state = json.loads(registry.read_text(encoding='utf-8'))
         except FileNotFoundError:
-            state = {'version': 1, 'routes': {}, 'ips': {}}
+            state = {'version': 1, 'profiles': {}}
         except (OSError, ValueError) as exc:
-            raise ConnectionError('Не удалось прочитать историю изоляции VPN; запуск заблокирован.') from exc
+            raise ConnectionError('Не удалось прочитать счётчик текущих подключений VPN.') from exc
         try:
             if (not isinstance(state, dict) or type(state.get('version')) is not int or
-                    state['version'] != 1 or not isinstance(state.get('routes'), dict) or
-                    not isinstance(state.get('ips'), dict)):
-                raise ValueError('Invalid network isolation registry')
-            for kind in ('routes', 'ips'):
-                for value, saved_owner in state[kind].items():
-                    if not isinstance(saved_owner, str) or not re.fullmatch(r'(?:profile:[a-z0-9 _-]+|slot:[0-9]+)', saved_owner):
-                        raise ValueError('Invalid network isolation owner')
-                    if kind == 'routes' and not re.fullmatch(r'[a-f0-9]{64}', value):
-                        raise ValueError('Invalid network isolation route')
-                    if kind == 'ips' and self._public_ip(value) != value:
-                        raise ValueError('Noncanonical network isolation IP')
+                    state['version'] != 1):
+                raise ValueError('Invalid current VPN usage')
+            profiles = state.get('profiles')
+            if not isinstance(profiles, dict):
+                raise ValueError('Invalid current VPN assignments')
+            for owner, assignment in profiles.items():
+                if (not isinstance(owner, str) or not re.fullmatch(r'(?:profile:[a-z0-9 _-]+|slot:[0-9]+)', owner) or
+                        not isinstance(assignment, dict) or
+                        not isinstance(assignment.get('route'), str) or not re.fullmatch(r'[a-f0-9]{64}', assignment['route']) or
+                        not isinstance(assignment.get('manager'), str) or not re.fullmatch(r'[a-f0-9]{32}', assignment['manager'])):
+                    raise ValueError('Invalid current VPN assignment')
+                identity = assignment.get('process')
+                if (not isinstance(identity, dict) or type(identity.get('pid')) is not int or identity['pid'] <= 0 or
+                        not isinstance(identity.get('created'), str) or not identity['created'].isdigit() or
+                        not isinstance(identity.get('executable'), str) or not identity['executable']):
+                    raise ValueError('Invalid VPN usage process')
+            identities = {}
+            for owner, assignment in list(profiles.items()):
+                identity = assignment['process']
+                pid = identity['pid']
+                if pid not in identities:
+                    identities[pid] = process_identity(pid)
+                actual = identities[pid]
+                if ((actual is not None and actual != identity) or
+                        (actual is None and not process_is_alive(pid))):
+                    del profiles[owner]
         except (TypeError, ValueError) as exc:
-            raise ConnectionError('История изоляции VPN повреждена; восстановите резервную копию.') from exc
+            raise ConnectionError('Счётчик текущих подключений VPN повреждён.') from exc
         return state
 
     def _isolation_snapshot(self):
-        with self._lock, runtime_lock(str(self._isolation_root / '.network-isolation.lock')):
+        with self._lock, runtime_lock(str(self._isolation_root / '.network-usage.lock')):
             return self._read_isolation_state()
 
-    def _claim_route(self, owner, endpoint, ip=None, *, reserve=True):
-        """Reserve actual exits permanently; availability probes only read history."""
+    def _route_load(self, state, owner, endpoint):
+        route = self._route_key(endpoint)
+        return sum(key != owner and item['route'] == route for key, item in state['profiles'].items())
+
+    def _claim_route(self, owner, endpoint, ip=None, *, reserve=True, alternatives=None):
+        """Count one current route per profile; a shared server/IP is allowed."""
         if reserve or ip is not None:
             ip = self._public_ip(ip)
         route = self._route_key(endpoint)
-        registry = self._isolation_root / '.network-isolation.json'
-        with self._lock, runtime_lock(str(self._isolation_root / '.network-isolation.lock')):
+        registry = self._isolation_root / '.network-usage.json'
+        with self._lock, runtime_lock(str(self._isolation_root / '.network-usage.lock')):
             state = self._read_isolation_state()
-            for kind, value in [('routes', route)] + ([('ips', ip)] if ip is not None else []):
-                previous = state[kind].get(value)
-                if previous is not None and previous != owner:
-                    reason = 'VPN-сервер' if kind == 'routes' else 'Внешний IP'
-                    raise RouteConflictError(f'{reason} уже закреплён за другим профилем. Назначьте отдельный VPN-сервер.')
-            if reserve and (state['routes'].get(route) != owner or state['ips'].get(ip) != owner):
-                state['routes'][route] = owner
-                state['ips'][ip] = owner
+            if not reserve:
+                return True
+            if alternatives is not None:
+                load = self._route_load(state, owner, endpoint)
+                if any(self._route_load(state, owner, candidate) < load for candidate in alternatives):
+                    return False
+            assignment = {'route': route, 'manager': self._manager_token, 'process': self._process_identity}
+            if state['profiles'].get(owner) != assignment:
+                state['profiles'][owner] = assignment
                 atomic_json(str(registry), state)
+            self._registered_owners.add(owner)
+            return True
+
+    def _release_route(self, owner):
+        with self._lock, runtime_lock(str(self._isolation_root / '.network-usage.lock')):
+            state = self._read_isolation_state()
+            assignment = state['profiles'].get(owner)
+            if assignment and assignment['manager'] == self._manager_token:
+                del state['profiles'][owner]
+                atomic_json(str(self._isolation_root / '.network-usage.json'), state)
+            self._registered_owners.discard(owner)
+
+    def _detach_profile(self, owner):
+        """Caller holds the manager lock; callbacks from the old gateway are ignored."""
+        existing = self._failover_routes.pop(owner, None)
+        self._selected_routes.pop(owner, None)
+        self._profile_processes.pop(owner, None)
+        self._release_route(owner)
+        if existing:
+            self._failover_status.pop(existing[1].proxy, None)
+        return existing[1] if existing else None
+
+    def release_profile(self, profile_key):
+        with self._lock:
+            gateway = self._detach_profile(f'profile:{profile_key.casefold()}')
+        if gateway:
+            gateway.close()
+
+    @staticmethod
+    def _process_current(identity):
+        if not identity:
+            return False
+        actual = process_identity(identity['pid'])
+        return actual == identity or (actual is None and process_is_alive(identity['pid']))
+
+    @contextmanager
+    def profile_launch(self, profile_key):
+        """Keep a browser restart from being mistaken for a closed profile."""
+        self.release_closed_profiles()
+        owner = f'profile:{profile_key.casefold()}'
+        with self._lock:
+            if self._closed.is_set():
+                raise ProxySelectionCancelled('Запуск отменён')
+            self._profile_launches[owner] = self._profile_launches.get(owner, 0) + 1
+        try:
+            yield
+        finally:
+            gateway = None
+            with self._lock:
+                count = self._profile_launches[owner] - 1
+                if count:
+                    self._profile_launches[owner] = count
+                else:
+                    del self._profile_launches[owner]
+                    if not self._process_current(self._profile_processes.get(owner)):
+                        gateway = self._detach_profile(owner)
+            if gateway:
+                gateway.close()
+
+    def track_profile_process(self, profile_key, identity):
+        owner = f'profile:{profile_key.casefold()}'
+        with self._lock:
+            self._profile_processes[owner] = dict(identity)
+
+    def release_closed_profiles(self):
+        with self._lock:
+            processes = list(self._profile_processes.items())
+        for owner, identity in processes:
+            if self._process_current(identity):
+                continue
+            with self._lock:
+                if self._profile_processes.get(owner) is not identity or self._profile_launches.get(owner):
+                    continue
+                gateway = self._detach_profile(owner)
+            if gateway:
+                gateway.close()
+
+    def release_all_profiles(self):
+        with self._lock:
+            gateways, self._failover_routes = self._failover_routes, {}
+            owners = list(self._registered_owners)
+            self._selected_routes.clear()
+            self._profile_processes.clear()
+            self._failover_status.clear()
+        error = None
+        for _, gateway in gateways.values():
+            try:
+                gateway.close()
+            except Exception as exc:
+                error = error or exc
+        for owner in owners:
+            try:
+                self._release_route(owner)
+            except Exception as exc:
+                error = error or exc
+        if error:
+            raise error
 
     def get_working_proxy_for_slot(self, slot_idx, status_callback=None, profile_key=None, cancel_callback=None):
         if type(slot_idx) is not int or slot_idx < 0:
@@ -389,75 +547,59 @@ class ProxyManager:
                 indices.sort(key=lambda candidate: candidate not in health)
         else:
             indices = [None]
-        state = self._isolation_snapshot()
-
         def endpoint_for(candidate):
-            if candidate is None:
-                return ('happ', self.default_happ_proxy)
-            node = nodes[candidate]
-            return _node_endpoint(node)
+            return _node_endpoint(nodes[candidate]) if candidate is not None else ('happ', self.default_happ_proxy)
 
-        available = [candidate for candidate in indices
-                     if state['routes'].get(self._route_key(endpoint_for(candidate)), owner) == owner]
-        occupied = len(indices) - len(available)
-        indices = available
-        # Reuse this profile's history after a restart before consuming new exits.
-        indices.sort(key=lambda candidate: state['routes'].get(self._route_key(endpoint_for(candidate))) != owner)
-        NETWORK_LOG.info('VPN pool slot=%s eligible=%s occupied=%s', slot_idx + 1, len(indices), occupied)
-        if not indices:
-            vd.last_error = (f'VPN-сервер уже закреплён за другим профилем. '
-                             f'Для слота #{slot_idx+1} нет свободных серверов: занято {occupied}. '
-                             'Добавьте отдельный VPN-сервер с другим внешним IP.')
-            raise RouteConflictError(vd.last_error)
         if nodes and not self.ensure_core_running():
             return 'ERROR_ALL_DOWN'
-        first_conflict, last_error = None, ''
-        for attempt, candidate in enumerate(indices, 1):
-            if cancel_callback and cancel_callback():
+        remaining = list(indices)
+        checked = {}
+        attempts, last_error = 0, ''
+        while remaining:
+            if self._closed.is_set() or (cancel_callback and cancel_callback()):
                 raise ProxySelectionCancelled('Запуск отменён')
-            if self._closed.is_set():
-                raise ProxySelectionCancelled('Запускатель закрывается')
-            if candidate is None:
-                proxy, endpoint = primary, ('happ', self.default_happ_proxy)
-            else:
-                node = nodes[candidate]
-                proxy = primary if candidate == index else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + candidate}'
-                endpoint = _node_endpoint(node)
-            if status_callback:
-                status_callback(f'Слот #{slot_idx+1}: проверка VPN {attempt}/{len(indices)}' +
-                                (f'; занято: {occupied}' if occupied else '') +
-                                ('; пробуем другой сервер…' if attempt > 1 else '…'))
-            try:
-                self._claim_route(owner, endpoint, reserve=False)
-            except RouteConflictError as exc:
-                first_conflict = first_conflict or exc
-                continue
-            if not self.check_proxy_alive(proxy, timeout=6):
+            state = self._isolation_snapshot()
+            assigned = state['profiles'].get(owner, {}).get('route')
+            remaining.sort(key=lambda candidate: (
+                health is not None and candidate not in health,
+                self._route_load(state, owner, endpoint_for(candidate)),
+                self._route_key(endpoint_for(candidate)) != assigned))
+            candidate = remaining[0]
+            endpoint = endpoint_for(candidate)
+            load = self._route_load(state, owner, endpoint)
+            proxy = primary if candidate is None or candidate == index else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + candidate}'
+            if candidate not in checked:
+                attempts += 1
+                if status_callback:
+                    status_callback(f'Слот #{slot_idx+1}: проверка VPN {attempts}/{len(indices)}; '
+                                    f'других профилей на сервере: {load}' +
+                                    ('; пробуем другой сервер…' if attempts > 1 else '…'))
+                if not self.check_proxy_alive(proxy, timeout=6):
+                    with self._lock:
+                        last_error = self._proxy_errors.get(proxy, 'HTTPS через прокси не прошёл.')
+                    remaining.remove(candidate)
+                    continue
                 with self._lock:
-                    last_error = self._proxy_errors.get(proxy, 'HTTPS через прокси не прошёл.')
-                continue
+                    checked[candidate] = self._route_ips.get(proxy)
             if cancel_callback and cancel_callback():
                 raise ProxySelectionCancelled('Запуск отменён')
-            # One lock order everywhere: manager -> dispatcher -> isolation file.
+            # Recheck load under the cross-process lock after the network probe.
+            # Concurrent launches must not all select the same formerly free node.
             with self._lock, vd.lock:
+                if self._closed.is_set():
+                    raise ProxySelectionCancelled('Запускатель закрывается')
                 current = vd.get_nodes_snapshot()
                 if tuple(_node_identity(item) for item in current) != signature:
                     raise ConnectionError('Назначение VPN изменилось во время проверки; повторите запуск.')
-                try:
-                    self._claim_route(owner, endpoint, self._route_ips.get(proxy))
-                except RouteConflictError as exc:
-                    first_conflict = first_conflict or exc
+                alternatives = [endpoint_for(item) for item in remaining
+                                if health is None or (item in health) == (candidate in health)]
+                if not self._claim_route(owner, endpoint, checked[candidate], alternatives=alternatives):
                     continue
                 if candidate is not None:
                     self._selected_routes[owner] = (signature, candidate)
-                NETWORK_LOG.info('VPN selected slot=%s node=%s attempts=%s fallback=%s',
-                                 slot_idx + 1, candidate, attempt, proxy != primary)
+                NETWORK_LOG.info('VPN selected slot=%s node=%s attempts=%s shared_profiles=%s fallback=%s',
+                                 slot_idx + 1, candidate, attempts, load, proxy != primary)
                 vd.last_error = ''
                 return proxy
-        if first_conflict:
-            vd.last_error = (f'Нет свободного рабочего VPN для слота #{slot_idx+1}; '
-                             f'занято серверов: {occupied}, кандидатов: {len(indices)}. {first_conflict}')
-            raise RouteConflictError(vd.last_error)
-        vd.last_error = (f'Не найден рабочий VPN для слота #{slot_idx+1}; проверено серверов: {len(indices)}; '
-                         f'занято другими профилями: {occupied}. {last_error}')
+        vd.last_error = (f'Не найден рабочий VPN для слота #{slot_idx+1}; проверено серверов: {attempts}. {last_error}')
         return 'ERROR_ALL_DOWN'

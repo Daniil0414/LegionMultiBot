@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 """Account login stages, duplicate prevention and the dialog's loading layer."""
 from concurrent.futures import Future
 import gc
@@ -15,6 +16,7 @@ if os.name == 'nt':
 class LoginTaskTests(unittest.TestCase):
     def launcher(self):
         return SimpleNamespace(_closing_browsers=False, use_vpn=True,
+            proxy_manager=SimpleNamespace(profile_launch=lambda key: nullcontext(), track_profile_process=Mock()),
             browser_profiles=Mock(generation=1), bot_profiles=[dict(key='one', name='Account 1')],
             status_lbl=Mock(), mute_var=Mock(get=lambda: False), browser_sessions={},
             get_launch_proxy=Mock(return_value='http://127.0.0.1:9000'), after=lambda delay, fn: fn())
@@ -35,10 +37,10 @@ class LoginTaskTests(unittest.TestCase):
             def open_browser(*args, **kwargs):
                 self.assertFalse(task.done(), 'The loading task completed before browser creation')
                 self.assertEqual(progress[-1][0], 'Открытие браузера')
-                return dict(browser_pid=123)
+                return dict(browser_pid=123, identity={'pid': 123})
             launcher.browser_profiles.launch.side_effect = open_browser
             thread.call_args.kwargs['target']()
-        self.assertEqual(task.result(), dict(browser_pid=123))
+        self.assertEqual(task.result(), dict(browser_pid=123, identity={'pid': 123}))
         self.assertIn(('Проверка VPN', 'Server 2/3'), progress)
         self.assertEqual(launcher.browser_sessions['one'], task.result())
         launcher._show_mine_control_after_game_open.assert_called_once_with()
@@ -137,7 +139,7 @@ class AccountLoadingTests(unittest.TestCase):
             from PIL import ImageGrab
             ImageGrab.grab(window=ctypes.windll.user32.GetAncestor(self.dialog.winfo_id(), 2)).save(
                 os.environ['LEGION_ACCOUNT_LOADING_SCREENSHOT'])
-        self.task.set_result(dict(browser_pid=123))
+        self.task.set_result(dict(browser_pid=123, identity={'pid': 123}))
         self.wait(lambda: not self.overlay.busy)
         self.assertFalse(self.overlay.winfo_ismapped())
         self.assertEqual(str(login['state']), 'normal')

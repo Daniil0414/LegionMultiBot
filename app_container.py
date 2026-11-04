@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import os
 import sys
 import json
@@ -1428,6 +1429,10 @@ class HighQualityMultiBoxerApp(tk.Tk):
             except Exception:
                 LAUNCH_LOG.exception('Browser cleanup failed')
             finally:
+                try:
+                    self.proxy_manager.release_all_profiles()
+                except Exception:
+                    LAUNCH_LOG.exception('VPN allocation cleanup failed')
                 done.set()
         threading.Thread(target=close_worker, daemon=False).start()
         def finish():
@@ -2150,6 +2155,16 @@ class HighQualityMultiBoxerApp(tk.Tk):
             if not task.set_running_or_notify_cancel():
                 return
             try:
+                context = self.proxy_manager.profile_launch(key) if self.use_vpn else nullcontext()
+                with context:
+                    _open()
+            except Exception as error:
+                if not task.done():
+                    task.set_exception(error)
+                LAUNCH_LOG.exception('Login VPN lifecycle failed')
+
+        def _open():
+            try:
                 # 1. Get working proxy inside worker thread so UI never freezes
                 report('Проверка VPN' if self.use_vpn else 'Открытие браузера', p_name)
                 if progress:
@@ -2177,6 +2192,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     args.append("--mute-audio")
 
                 session = self.browser_profiles.launch(CHROME_EXE, key, proxy_arg, args[1:], generation=generation)
+                if self.use_vpn:
+                    self.proxy_manager.track_profile_process(key, session['identity'])
                 self.browser_sessions[key] = session
                 present = getattr(self, '_present_login_browser', None)
                 if present:
@@ -2516,6 +2533,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
                             user32.PostMessageW(h, 0x0010, 0, 0)
                         self.profile_hwnds.pop(k, None)
                         self.browser_sessions.pop(k, None)
+                        self.proxy_manager.release_profile(k)
                         self.bot_profiles = [x for x in self.bot_profiles if x["key"] != k]
                         save_accounts(self.bot_profiles)
                         self.sync_accounts_ui()
@@ -2642,6 +2660,11 @@ class HighQualityMultiBoxerApp(tk.Tk):
             self.update_slot_proxy_badge(slot_idx, 'ERROR_ALL_DOWN' if vpn else None)
 
     def run_launch_single(self, key, slot_idx, proxy_slot_idx=None, target_url=None, generation=None):
+        context = self.proxy_manager.profile_launch(key) if self.use_vpn else nullcontext()
+        with context:
+            return self._run_launch_single(key, slot_idx, proxy_slot_idx, target_url, generation)
+
+    def _run_launch_single(self, key, slot_idx, proxy_slot_idx=None, target_url=None, generation=None):
         if self._closing_browsers:
             return False
         generation = self.browser_profiles.generation if generation is None else generation
@@ -2694,6 +2717,8 @@ class HighQualityMultiBoxerApp(tk.Tk):
         try:
             self.after(0, lambda: self.status_lbl.config(text=f"Подготовка отдельного профиля: {key}..."))
             session = self.browser_profiles.launch(CHROME_EXE, key, proxy_arg, args[1:], generation=generation)
+            if self.use_vpn:
+                self.proxy_manager.track_profile_process(key, session['identity'])
             browser_pid = session['pid']
             notice = self.userscript_launch_note()
             if notice:

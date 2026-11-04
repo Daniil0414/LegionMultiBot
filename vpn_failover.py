@@ -39,6 +39,10 @@ class Route:
     checked_at: float
 
 
+class RouteSelectionChanged(ConnectionError):
+    """A ready route needs fresh load balancing, rather than a network cooldown."""
+
+
 class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -102,6 +106,8 @@ class FailoverProxy:
                     try:
                         self._activate(standby.proxy, standby.ip)
                         self._active = standby
+                    except RouteSelectionChanged:
+                        pass
                     except Exception:
                         self._failed_until[standby.proxy] = time.monotonic() + self.STANDBY_MAX_AGE
             elif self._standby and self._standby.proxy == route.proxy:

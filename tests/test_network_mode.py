@@ -128,6 +128,7 @@ class NetworkModeTests(unittest.TestCase):
                                    status_lbl=Mock(), mute_var=Mock(), browser_sessions={},
                                    after=lambda delay, callback: callback(), slot_urls={},
                                    update_slot_proxy_badge=Mock())
+        launcher._run_launch_single = lambda *args: app.HighQualityMultiBoxerApp._run_launch_single(launcher, *args)
         launcher.mute_var.get.return_value = False
         launcher.get_launch_proxy = lambda key, slot: app.HighQualityMultiBoxerApp.get_launch_proxy(launcher, key, slot)
         with patch.object(app.threading, 'Thread') as thread:

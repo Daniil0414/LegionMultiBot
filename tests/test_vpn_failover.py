@@ -306,22 +306,22 @@ class ManagerFailoverTests(unittest.TestCase):
         self.assertEqual(self.manager.failover_status(proxy)['ip'], '8.8.8.8')
         self.assertEqual(self.manager._route_ips[proxy], '8.8.8.8')
 
-    def test_reserved_exit_ip_and_server_are_never_used_as_standby(self):
+    def test_standby_prefers_a_free_server_even_when_it_shares_a_public_ip(self):
         self.manager._claim_route('profile:b', ('socks5', 'second.invalid', 1080), '1.1.1.1')
         self.fetch.side_effect = lambda proxy, timeout: '8.8.8.8' if proxy.endswith('10810') else '1.1.1.1'
         self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
         gateway = self.manager._failover_routes['profile:a'][1]
-        self.assertIsNone(gateway._choose_backup({'socks5://127.0.0.1:10810'}))
-        self.assertFalse(gateway.status['standby_ready'])
+        self.assertEqual(gateway._choose_backup({'socks5://127.0.0.1:10810'}), ('socks5://127.0.0.1:10812', '1.1.1.1'))
 
-    def test_changed_exit_is_claimed_before_it_can_become_active(self):
-        proxy = self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
+    def test_changed_shared_exit_is_registered_without_blocking_the_working_route(self):
+        self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
         gateway = self.manager._failover_routes['profile:a'][1]
         self.manager._claim_route('profile:b', ('socks5', 'third.invalid', 1080), '1.1.1.1')
         self.fetch.return_value = '1.1.1.1'
-        with self.assertRaises(RouteConflictError):
-            gateway._verify('socks5://127.0.0.1:10810')
-        self.assertEqual(self.manager._route_ips[proxy], '8.8.8.8')
+        self.assertEqual(gateway._verify('socks5://127.0.0.1:10810'), '1.1.1.1')
+        state = self.manager._isolation_snapshot()
+        self.assertEqual(len(state['profiles']), 2)
+        self.assertEqual(self.manager._route_ips['socks5://127.0.0.1:10810'], '1.1.1.1')
 
     def test_changed_node_order_blocks_the_old_gateway(self):
         self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
@@ -335,7 +335,7 @@ class ManagerFailoverTests(unittest.TestCase):
         self.fetch.side_effect = lambda proxy, timeout: '8.8.8.8' if proxy.endswith('10810') else '1.1.1.1'
         self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
         gateway = self.manager._failover_routes['profile:a'][1]
-        registry = self.manager._isolation_root / '.network-isolation.json'
+        registry = self.manager._isolation_root / '.network-usage.json'
         original = registry.read_bytes()
         standby = gateway._choose_backup({'socks5://127.0.0.1:10810'})
         self.assertIsNotNone(standby)
@@ -345,20 +345,21 @@ class ManagerFailoverTests(unittest.TestCase):
         gateway._failed(gateway._active)
         self.assertEqual(gateway.status['proxy'], standby[0])
         state = json.loads(registry.read_text())
-        self.assertEqual(state['ips']['1.1.1.1'], 'profile:a')
+        self.assertEqual(len(state['profiles']), 1)
+        self.assertEqual(self.manager._route_ips[standby[0]], '1.1.1.1')
+        self.assertNotIn('ips', state)
 
-    def test_standby_taken_by_another_profile_is_blocked_before_activation(self):
+    def test_standby_taken_by_another_profile_can_be_shared_on_activation(self):
+        self.dispatcher.nodes = self.dispatcher.nodes[:2]
         self.fetch.side_effect = lambda proxy, timeout: '8.8.8.8' if proxy.endswith('10810') else '1.1.1.1'
         self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
         gateway = self.manager._failover_routes['profile:a'][1]
         standby = gateway._choose_backup({'socks5://127.0.0.1:10810'})
-        index = int(standby[0].rsplit(':', 1)[1]) - 10810
-        node = self.dispatcher.nodes[index]
-        self.manager._claim_route('profile:b', (node.protocol, node.address, node.port), standby[1])
+        self.manager._claim_route('profile:b', ('socks5', 'second.invalid', 1080), standby[1])
         gateway._standby = Route(*standby, time.monotonic())
         gateway._failed(gateway._active)
-        self.assertIsNone(gateway.status['proxy'])
-        self.assertFalse(gateway.status['standby_ready'])
+        self.assertEqual(gateway.status['proxy'], standby[0])
+        self.assertEqual(len(self.manager._isolation_snapshot()['profiles']), 2)
 
 
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('LEGION_TEST_CHROME'), 'Set LEGION_TEST_CHROME for Chrome failover tests')

@@ -314,23 +314,11 @@ class BrowserProfiles:
                         'userscript': self.userscripts.status()}
 
     def proxy_slot(self, key, suggested):
-        """Keep the account's route index stable across UI reordering and launchers."""
+        """Use the current UI position only as a tie-breaker, never a binding."""
         self.directory(key)
         if type(suggested) is not int or suggested < 0:
             raise ValueError('Invalid proxy slot index')
-        registry = self.root / '.network-slots.json'
-        with self._lock, runtime_lock(str(self.root / '.network-slots.lock')):
-            slots = json.loads(registry.read_text(encoding='utf-8')) if registry.exists() else {}
-            if not isinstance(slots, dict) or any(type(v) is not int or v < 0 for v in slots.values()):
-                raise ValueError('Invalid .network-slots.json; restore the profile backup')
-            if key not in slots:
-                used = set(slots.values())
-                candidate = suggested
-                while candidate in used:
-                    candidate += 1
-                slots[key] = candidate
-                atomic_json(str(registry), slots)
-            return slots[key]
+        return suggested
 
     @staticmethod
     def _privacy_preferences(directory):

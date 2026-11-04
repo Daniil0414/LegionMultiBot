@@ -130,13 +130,14 @@ class MobileUnitTests(unittest.TestCase):
                     profiles.launch('chrome.exe', 'account', 'http://127.0.0.1:1234', arguments)
                 browser.assert_not_called()
 
-    def test_proxy_slot_is_stable_and_not_shared_when_accounts_reorder(self):
+    def test_proxy_slot_does_not_bind_servers_when_accounts_reorder(self):
         profiles = bp.BrowserProfiles(root=self.root)
         self.assertEqual(profiles.proxy_slot('account-a', 0), 0)
-        self.assertEqual(profiles.proxy_slot('account-b', 0), 1)
+        self.assertEqual(profiles.proxy_slot('account-b', 0), 0)
+        (self.root / '.network-slots.json').write_text('broken legacy data')
         restarted = bp.BrowserProfiles(root=self.root)
-        self.assertEqual(restarted.proxy_slot('account-a', 9), 0)
-        self.assertEqual(restarted.proxy_slot('account-b', 0), 1)
+        self.assertEqual(restarted.proxy_slot('account-a', 9), 9)
+        self.assertEqual(restarted.proxy_slot('account-b', 0), 0)
 
     def test_native_privacy_preference_preserves_other_settings_and_backup(self):
         directory = self.root / 'account'

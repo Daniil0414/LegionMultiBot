@@ -22,7 +22,7 @@ SOURCE_FILES = (
     'tests/test_native_browser.py', 'tests/test_docked_browser.py', 'tests/test_gui_layout.py', 'tests/test_browser_focus.py', 'tests/test_vpn_lifecycle.py', 'tests/test_account_loading.py', 'tests/test_embedded_login.py',
     'server.js', 'secure_launch.js', 'manager_access.js', 'quick_launch.js',
     'public/index.html', 'public/app.js', 'public/style.css', 'README.md', 'package_app.py',
-    'tests/test_vpn_safety.py', 'tests/test_vpn_failover.py', 'tests/test_network_mode.py', 'tests/test_subscription.py', 'tests/test_mobile_browser.py', 'tests/test_package_app.py', 'tests/test_browser_lifecycle.py', 'tests/test_chrome_transport.py',
+    'tests/test_vpn_safety.py', 'tests/test_vpn_failover.py', 'tests/test_vpn_allocation.py', 'tests/test_network_mode.py', 'tests/test_subscription.py', 'tests/test_mobile_browser.py', 'tests/test_package_app.py', 'tests/test_browser_lifecycle.py', 'tests/test_chrome_transport.py',
     'tests/secure_launch.test.js', 'tests/manager_access.test.js', 'tests/server_access.test.js',
     'tests/test_shutdown.py', 'tests/manager_lifecycle.test.js',
     'START_MULTIBOT.bat', 'START_WEB_MANAGER.bat', 'Запустить_Мультибот.bat',
