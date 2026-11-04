@@ -13,7 +13,7 @@ class DataPathTests(unittest.TestCase):
             root = Path(folder)
             with (patch.dict(os.environ, {'LOCALAPPDATA': str(root / 'local')}, clear=True),
                   patch.object(app_paths, 'RESOURCE_DIR', root / 'repository')):
-                expected = root / 'local/LegionMultiBot/Development'
+                expected = (root / 'local/LegionMultiBot/Development').resolve()
                 self.assertEqual(app_paths.data_directory(False), expected)
                 self.assertEqual(app_paths.profile_directory(False), expected / 'Bots')
                 self.assertFalse(expected.exists(), 'Path lookup must not create working data')
@@ -28,5 +28,5 @@ class DataPathTests(unittest.TestCase):
             root = Path(folder)
             with (patch.dict(os.environ, {'LOCALAPPDATA': str(root / 'local')}, clear=True),
                   patch.object(app_paths, 'APP_DIR', root / 'portable/app')):
-                self.assertEqual(app_paths.data_directory(True), root / 'portable/app')
+                self.assertEqual(app_paths.data_directory(True), (root / 'portable/app').resolve())
                 self.assertEqual(app_paths.profile_directory(True), root / 'local/LegionMultiBot/Bots')
