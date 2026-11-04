@@ -24,6 +24,12 @@ function transform(source) {
     block.body[0].type === 'ExpressionStatement' && block.body[0].expression.type === 'CallExpression' &&
     block.body[0].expression.callee.type === 'Identifier' && block.body[0].expression.callee.name === method &&
     block.body[0].expression.arguments.length === 0;
+  const isMinePausedTest = test => Boolean(test && (
+    test.type === 'Identifier' && test.name === 'isPaused' ||
+    test.type === 'LogicalExpression' && test.operator === '&&' &&
+      (test.left?.type === 'Identifier' && test.left?.name === 'isPaused' ||
+       test.right?.type === 'Identifier' && test.right?.name === 'isPaused')
+  ));
   function isMineToggle(node) {
     const assignment = node.expression, target = assignment?.left, handler = assignment?.right;
     const branch = handler?.body?.body?.[0];
@@ -32,7 +38,7 @@ function transform(source) {
       target.object.type === 'Identifier' && target.object.name === 'btn' && propertyName(target) === 'onclick' &&
       handler.type === 'ArrowFunctionExpression' && handler.params.length === 0 &&
       handler.body.type === 'BlockStatement' && handler.body.body.length === 1 &&
-      branch?.type === 'IfStatement' && branch.test.type === 'Identifier' && branch.test.name === 'isPaused' &&
+      branch?.type === 'IfStatement' && isMinePausedTest(branch.test) &&
       calls(branch.consequent, 'startBot') && calls(branch.alternate, 'pauseBot');
   }
   function emit(node) {

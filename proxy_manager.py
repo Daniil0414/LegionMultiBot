@@ -244,7 +244,7 @@ class ProxyManager:
             endpoint = endpoint_for(proxy)
             # Validate registry integrity without reserving capacity for a probe.
             self._claim_route(owner, endpoint, reserve=False)
-            ip = fetch_proxy_ip(proxy, timeout=2)
+            ip = fetch_proxy_ip(proxy, timeout=4)
             with self._lock, vd.lock:
                 if not valid():
                     raise ConnectionError('Назначение VPN изменилось; маршрут заблокирован.')

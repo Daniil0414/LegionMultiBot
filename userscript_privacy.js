@@ -36,13 +36,35 @@
   const unlisten = EventTarget.prototype.removeEventListener.bind(window);
   const EventClass = CustomEvent;
   let mineControl = null;
+  const domMineControl = action => {
+    const btn = (shadow && shadowQuery(shadow, '#b-btn')) || nativeQuery('#b-btn') || (document.querySelector && document.querySelector('#b-btn'));
+    if (!btn) throw new Error('unavailable');
+    const st = (shadow && shadowQuery(shadow, '#b-st')) || nativeQuery('#b-st') || (document.querySelector && document.querySelector('#b-st'));
+    const isPaused = st ? (st.textContent.includes('пауз') || !st.textContent.includes('работ'))
+                        : (btn.textContent.includes('Старт') || !btn.textContent.includes('Пауз'));
+    const wantsPause = action === 'pause';
+    const previous = isPaused;
+    if (isPaused !== wantsPause) {
+      btn.click();
+    }
+    const currentPaused = st ? (st.textContent.includes('пауз') || !st.textContent.includes('работ'))
+                             : (btn.textContent.includes('Старт') || !btn.textContent.includes('Пауз'));
+    return { state: currentPaused ? 'paused' : 'running', changed: previous !== currentPaused };
+  };
   if (config.mineCommand && config.mineReply) listen(config.mineCommand, event => {
-    if (!mineControl || typeof event.detail !== 'string' || event.detail.length > 1024) return;
+    if (typeof event.detail !== 'string' || event.detail.length > 1024) return;
     let packet;
     try { packet = parse(event.detail); } catch (_) { return; }
     if (!packet || typeof packet.id !== 'string' || !['start', 'pause'].includes(packet.action)) return;
     let result;
-    try { result = {ok: true, ...mineControl(packet.action)}; }
+    try {
+      if (typeof mineControl === 'function') {
+        try { result = {ok: true, ...mineControl(packet.action)}; }
+        catch (_) { result = {ok: true, ...domMineControl(packet.action)}; }
+      } else {
+        result = {ok: true, ...domMineControl(packet.action)};
+      }
+    }
     catch (error) { result = {ok: false, error: error.message === 'not_confirmed' ? 'not_confirmed' : 'unavailable'}; }
     dispatch(new EventClass(config.mineReply, {detail: stringify({id: packet.id, ...result})}));
   });

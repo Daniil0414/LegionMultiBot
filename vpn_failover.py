@@ -55,9 +55,10 @@ class _Handler(socketserver.BaseRequestHandler):
 
 
 class FailoverProxy:
-    CHECK_INTERVAL = 2.0
-    STANDBY_MAX_AGE = 15.0
+    CHECK_INTERVAL = 6.0
+    STANDBY_MAX_AGE = 45.0
     CONNECT_TIMEOUT = 2.0
+    MAX_PROBE_FAILURES = 2
 
     def __init__(self, primary, ip, verify, choose_backup, on_change, valid=lambda: True, *, probe=None, activate=None):
         self._lock = threading.RLock()
@@ -74,6 +75,7 @@ class FailoverProxy:
         self._standby = None
         self._preparing = False
         self._failed_until = {}
+        self._probe_failures = {}
         self._tunnels = {}
         self._server = _Server(('127.0.0.1', 0), _Handler)
         self._server.gateway = self
@@ -96,6 +98,7 @@ class FailoverProxy:
 
     def _failed(self, route):
         with self._lock:
+            self._probe_failures.pop(route.proxy, None)
             self._failed_until[route.proxy] = time.monotonic() + self.STANDBY_MAX_AGE
             changed = bool(self._active and self._active.proxy == route.proxy)
             if changed:
@@ -173,6 +176,8 @@ class FailoverProxy:
             def check(route):
                 try:
                     ip = self._probe(route.proxy)
+                    with self._lock:
+                        self._probe_failures[route.proxy] = 0
                     refreshed = Route(route.proxy, ip, time.monotonic())
                     with self._lock:
                         if self._active == route:
@@ -182,7 +187,14 @@ class FailoverProxy:
                             self._standby = refreshed
                     self._publish()
                 except Exception:
-                    self._failed(route)
+                    with self._lock:
+                        fails = self._probe_failures.get(route.proxy, 0) + 1
+                        self._probe_failures[route.proxy] = fails
+                        should_fail = fails >= getattr(self, 'MAX_PROBE_FAILURES', 2)
+                        if should_fail:
+                            self._probe_failures[route.proxy] = 0
+                    if should_fail:
+                        self._failed(route)
             with ThreadPoolExecutor(max_workers=2) as pool:
                 for result in as_completed([pool.submit(check, route) for route in routes]):
                     result.result()
@@ -273,6 +285,7 @@ class FailoverProxy:
         self._closed.set()
         self._wake.set()
         with self._lock:
+            self._probe_failures.clear()
             self._active = self._standby = None
             pairs = list(self._tunnels)
         for pair in pairs:

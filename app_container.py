@@ -622,7 +622,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         now = time.monotonic()
         stale = [(key, session) for key, session in self.browser_sessions.items()
                  if now - session.get('verified_at', 0) >=
-                 (2 if self.proxy_manager.failover_status(session['proxy']) is not None else 30)]
+                 (6 if self.proxy_manager.failover_status(session['proxy']) is not None else 30)]
         if not stale:
             return
         self._session_check_busy = True

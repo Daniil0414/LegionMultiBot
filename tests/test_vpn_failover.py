@@ -129,6 +129,20 @@ class GatewayFixture(unittest.TestCase):
 
 
 class GatewayTests(GatewayFixture):
+    def test_single_transient_probe_failure_does_not_disconnect_active_route(self):
+        call_count = [0]
+        def flaky_check(proxy):
+            if proxy == self.first.proxy:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise ConnectionError('transient network hiccup')
+                return '8.8.8.8'
+            return '1.1.1.1'
+        gateway = self.gateway(verify=flaky_check)
+        self.assertTrue(wait_for(lambda: gateway.status['standby_ready']))
+        time.sleep(.15)
+        self.assertEqual(gateway.status['proxy'], self.first.proxy)
+
     def test_health_failure_switches_same_gateway_and_closes_old_tunnels(self):
         gateway = self.gateway()
         self.assertTrue(wait_for(lambda: gateway.status['standby_ready']))

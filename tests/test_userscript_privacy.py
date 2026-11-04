@@ -78,3 +78,31 @@ class PrivateStorageTests(unittest.TestCase):
                         digest=hashlib.sha256(s.encode()).hexdigest())
                    for i, s in enumerate((source, 'window.fixture = true;'))]
         self.assertTrue(UserscriptManager._bundle({'scripts': entries})['private_state'])
+
+    def test_supported_bot_preserves_mine_control_even_with_compound_toggles(self):
+        compound_source = '''// ==UserScript==
+// @namespace https://github.com/Daniil0414/LegionAutoMiner
+// ==/UserScript==
+(() => {
+  window.__mineBotRunning = true;
+  let isPaused = true, miningStartToken = null;
+  const btn = {isConnected: true, onclick() {}};
+  function startBot() { isPaused = false; }
+  function pauseBot() { isPaused = true; }
+  btn.onclick = () => { if (isPaused && !miningStartToken) { startBot(); } else { pauseBot(); } };
+})();'''
+        compiled = compile_script(compound_source)
+        self.assertTrue(compiled['mine_control'])
+        self.assertEqual(compiled['privacy_changes'].get('mineControls'), 1)
+
+    def test_supported_bot_always_has_mine_control_enabled_even_if_toggle_ast_unmatched(self):
+        unknown_toggle_source = '''// ==UserScript==
+// @namespace https://github.com/Daniil0414/LegionAutoMiner
+// ==/UserScript==
+(() => {
+  window.__mineBotRunning = true;
+  const btn = document.querySelector('#b-btn');
+})();'''
+        compiled = compile_script(unknown_toggle_source)
+        self.assertTrue(compiled['mine_control'])
+        self.assertEqual(compiled['privacy_changes'].get('mineControls', 0), 0)

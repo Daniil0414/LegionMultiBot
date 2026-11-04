@@ -81,6 +81,27 @@ test('mine control clicks the actual toggle only when a state change is needed',
   assert.equal(page.readFixture().clicks, 2);
 });
 
+test('mine control supports compound toggle conditions like isPaused && !miningStartToken', () => {
+  let command;
+  const fixture = `(() => {
+    window.__mineBotRunning = true;
+    let isPaused = true, miningStartToken = null, clicks = 0;
+    const btn = {isConnected:true, click() {clicks++; this.onclick();}};
+    function startBot() { isPaused = false; }
+    function pauseBot() { isPaused = true; }
+    btn.onclick = () => { if (isPaused && !miningStartToken) { startBot(); } else { pauseBot(); } };
+    window.readFixture = () => ({isPaused, clicks});
+    window.closeFixture = () => { window.__mineBotRunning = false; };
+  })();`;
+  const page = execute(fixture, {registerMineControl: handler => { command = handler; }});
+  assert.equal(command('start').state, 'running');
+  assert.equal(command('start').changed, false);
+  assert.equal(page.readFixture().clicks, 1);
+  assert.equal(command('pause').state, 'paused');
+  assert.equal(command('pause').changed, false);
+  assert.equal(page.readFixture().clicks, 2);
+});
+
 test('a changed toggle format keeps the script intact and leaves remote control unavailable', () => {
   const result = transform('window.__mineBotRunning = true; const btn = {}; btn.onclick = () => startBot();');
   assert.equal(result.stats.mineControls, 0);
