@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox
 from proxy_manager import ProxyManager
 from browser_profiles import BrowserProfiles
 from app_update_ui import StartupUpdater
+from app_paths import DATA_DIR
 
 # Locate Chrome
 def find_chrome():
@@ -70,7 +71,7 @@ class ProfilePagerApp(tk.Tk):
         self.minsize(700, 520)
         self.configure(bg="#0b0f19")
 
-        self.proxy_manager = ProxyManager(os.path.dirname(os.path.abspath(__file__)))
+        self.proxy_manager = ProxyManager(str(DATA_DIR))
         self.browser_profiles = BrowserProfiles()
         self._shutting_down = False
         self.protocol('WM_DELETE_WINDOW', self.shutdown_app)

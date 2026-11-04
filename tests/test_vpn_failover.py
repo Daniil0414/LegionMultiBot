@@ -1,5 +1,6 @@
 """Exercise real SOCKS sockets and Chrome against isolated local VPN fixtures."""
 from contextlib import ExitStack
+import json
 import os
 from pathlib import Path
 import socket
@@ -166,6 +167,18 @@ class GatewayTests(GatewayFixture):
             with self.assertRaises(socket.timeout):
                 direct.accept()
 
+    def test_rejected_standby_activation_never_forwards_account_traffic(self):
+        gateway = self.gateway(monitor=False)
+        gateway._activate = Mock(side_effect=RouteConflictError('fixture standby belongs to another profile'))
+        gateway._standby = Route(self.second.proxy, '1.1.1.1', time.monotonic())
+        self.first.broken = True
+        stream, code = connect_gateway(gateway.proxy)
+        stream.close()
+        self.assertNotEqual(code, 0)
+        gateway._activate.assert_called_once_with(self.second.proxy, '1.1.1.1')
+        self.assertEqual(self.second.destinations, [])
+        self.assertIsNone(gateway.status['proxy'])
+
     def test_expired_standby_is_not_used(self):
         gateway = self.gateway(monitor=False)
         gateway._standby = Route(self.second.proxy, '1.1.1.1', time.monotonic() - 60)
@@ -317,6 +330,35 @@ class ManagerFailoverTests(unittest.TestCase):
         self.assertFalse(gateway._valid())
         with self.assertRaises(ConnectionError):
             gateway._verify('socks5://127.0.0.1:10810')
+
+    def test_standby_probes_do_not_consume_servers_or_ips(self):
+        self.fetch.side_effect = lambda proxy, timeout: '8.8.8.8' if proxy.endswith('10810') else '1.1.1.1'
+        self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
+        gateway = self.manager._failover_routes['profile:a'][1]
+        registry = self.manager._isolation_root / '.network-isolation.json'
+        original = registry.read_bytes()
+        standby = gateway._choose_backup({'socks5://127.0.0.1:10810'})
+        self.assertIsNotNone(standby)
+        gateway._probe(standby[0])
+        self.assertEqual(registry.read_bytes(), original)
+        gateway._standby = Route(*standby, time.monotonic())
+        gateway._failed(gateway._active)
+        self.assertEqual(gateway.status['proxy'], standby[0])
+        state = json.loads(registry.read_text())
+        self.assertEqual(state['ips']['1.1.1.1'], 'profile:a')
+
+    def test_standby_taken_by_another_profile_is_blocked_before_activation(self):
+        self.fetch.side_effect = lambda proxy, timeout: '8.8.8.8' if proxy.endswith('10810') else '1.1.1.1'
+        self.manager.get_resilient_proxy_for_slot(0, profile_key='a')
+        gateway = self.manager._failover_routes['profile:a'][1]
+        standby = gateway._choose_backup({'socks5://127.0.0.1:10810'})
+        index = int(standby[0].rsplit(':', 1)[1]) - 10810
+        node = self.dispatcher.nodes[index]
+        self.manager._claim_route('profile:b', (node.protocol, node.address, node.port), standby[1])
+        gateway._standby = Route(*standby, time.monotonic())
+        gateway._failed(gateway._active)
+        self.assertIsNone(gateway.status['proxy'])
+        self.assertFalse(gateway.status['standby_ready'])
 
 
 @unittest.skipUnless(os.name == 'nt' and os.environ.get('LEGION_TEST_CHROME'), 'Set LEGION_TEST_CHROME for Chrome failover tests')

@@ -28,11 +28,11 @@ from vpn_runtime import (atomic_json, process_identity, runtime_lock, process_de
                          process_is_alive, terminate_verified_process)
 from browser_lifecycle import BrowserJob, resume_browser as resume_process
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from app_paths import APP_DIR, bundled_xray
+from app_paths import APP_DIR, DATA_DIR, bundled_xray, profile_directory
 
 CURRENT_DIR = str(APP_DIR)
-LEGACY_CONFIG_FILE = os.path.join(CURRENT_DIR, "vpn_config.json")
-RUNTIME_DIR = os.path.join(CURRENT_DIR, ".vpn_runtime")
+LEGACY_CONFIG_FILE = os.path.join(DATA_DIR, "vpn_config.json")
+RUNTIME_DIR = os.path.join(DATA_DIR, ".vpn_runtime")
 CONFIG_FILE = os.path.join(RUNTIME_DIR, "vpn_config.json")
 CORE_OWNER_FILE = os.path.join(RUNTIME_DIR, "xray_owner.json")
 CORE_LOCK_FILE = os.path.join(RUNTIME_DIR, "xray.lock")
@@ -1166,7 +1166,7 @@ class VpnDispatcher:
             raise
 
     def _managed_proxy_browsers_alive(self):
-        root = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'LegionMultiBot', 'Bots')
+        root = str(profile_directory())
         if not os.path.isdir(root):
             return False
         for entry in os.scandir(root):

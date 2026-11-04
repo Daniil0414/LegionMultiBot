@@ -155,7 +155,7 @@ class NetworkModeTests(unittest.TestCase):
               patch.object(app, 'BrowserProfiles') as profiles):
             launcher = cls()
             try:
-                manager.assert_called_once_with(app.CURRENT_DIR, start_monitor=False)
+                manager.assert_called_once_with(str(app.DATA_DIR), start_monitor=False)
                 profiles.assert_called_once_with(allow_direct=True)
                 callbacks = [call.args[1] for call in after.call_args_list]
                 self.assertNotIn(launcher.periodic_vpn_check, callbacks)

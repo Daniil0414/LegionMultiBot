@@ -12,6 +12,7 @@ from proxy_network import NETWORK_LOG, fetch_proxy_ip
 from vpn_dispatcher import VpnDispatcher, BASE_LOCAL_PORT, parse_raw_nodes, _node_identity
 from vpn_runtime import atomic_json, runtime_lock
 from vpn_failover import FailoverProxy
+from app_paths import profile_directory
 
 
 class RouteConflictError(ConnectionError):
@@ -20,6 +21,10 @@ class RouteConflictError(ConnectionError):
 
 class ProxySelectionCancelled(RuntimeError):
     pass
+
+
+def _node_endpoint(node):
+    return (node.protocol, str(node.address).lower().rstrip('.'), int(node.port))
 
 
 class ProxyEntry(str):
@@ -76,9 +81,8 @@ class ProxyManager:
         self._selected_routes = {}
         self._failover_routes = {}
         self._failover_status = {}
-        local = Path(os.environ.get('LOCALAPPDATA', ''))
         self._isolation_root = (Path(isolation_root) if isolation_root is not None
-                                else local / 'LegionMultiBot' / 'Bots')
+                                else profile_directory())
         self._closed = threading.Event()
         self.proxies = []
         self.vpn_dispatcher = VpnDispatcher()
@@ -179,7 +183,7 @@ class ProxyManager:
             return (not self._closed.is_set() and
                     tuple(_node_identity(n) for n in vd.get_nodes_snapshot()) == signature)
 
-        def verify(proxy):
+        def endpoint_for(proxy):
             if not valid():
                 raise ConnectionError('Назначение VPN изменилось; маршрут заблокирован.')
             port = urllib.parse.urlsplit(proxy).port
@@ -189,15 +193,27 @@ class ProxyManager:
                 if not 0 <= index < max(48, len(nodes)):
                     raise ConnectionError('Неизвестный маршрут VPN')
                 node = nodes[index % len(nodes)]
-                endpoint = (node.protocol, str(node.address).lower().rstrip('.'), int(node.port))
+                endpoint = _node_endpoint(node)
             else:
                 endpoint = ('happ', self.default_happ_proxy)
+            return endpoint
+
+        def activate(proxy, ip):
+            with self._lock, vd.lock:
+                self._claim_route(owner, endpoint_for(proxy), ip)
+                self._route_ips[proxy] = ip
+
+        def verify(proxy, reserve=True):
+            endpoint = endpoint_for(proxy)
+            # A busy endpoint cannot become this profile's exit, even if its IP changes.
+            self._claim_route(owner, endpoint, reserve=False)
             ip = fetch_proxy_ip(proxy, timeout=2)
             with self._lock, vd.lock:
                 if not valid():
                     raise ConnectionError('Назначение VPN изменилось; маршрут заблокирован.')
-                self._claim_route(owner, endpoint, ip)
-                self._route_ips[proxy] = ip
+                self._claim_route(owner, endpoint, ip, reserve=reserve)
+                if reserve:
+                    self._route_ips[proxy] = ip
             return ip
 
         cursor = [0]
@@ -208,7 +224,10 @@ class ProxyManager:
             nodes = vd.get_nodes_snapshot()
             with vd.lock:
                 healthy = set(vd.alive_indices) if vd._health_revision == vd._nodes_revision else None
-            indices = sorted(range(len(nodes)), key=lambda i: (healthy is not None and i not in healthy, i < 48, i))
+            state = self._isolation_snapshot()
+            indices = sorted(range(len(nodes)), key=lambda i: (
+                state['routes'].get(self._route_key(_node_endpoint(nodes[i]))) != owner,
+                healthy is not None and i not in healthy, i < 48, i))
             if not nodes:
                 indices = [None]
             # Continue through the pool on subsequent passes; never stall health
@@ -220,8 +239,13 @@ class ProxyManager:
                 proxy = self.default_happ_proxy if index is None else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + index}'
                 if proxy in excluded:
                     continue
+                endpoint = endpoint_for(proxy)
+                if state['routes'].get(self._route_key(endpoint), owner) != owner:
+                    continue
                 try:
-                    return proxy, verify(proxy)
+                    # Probing a standby must not permanently consume its server/IP.
+                    # Activation claims it atomically before any account traffic.
+                    return proxy, verify(proxy, reserve=False)
                 except Exception:
                     attempts += 1
                     if attempts >= 2:
@@ -251,7 +275,8 @@ class ProxyManager:
                 return existing[1].proxy
             if not valid() or (cancel_callback and cancel_callback()):
                 raise ProxySelectionCancelled('Запуск отменён')
-            gateway = FailoverProxy(primary, self._route_ips[primary], verify, choose_backup, changed, valid)
+            gateway = FailoverProxy(primary, self._route_ips[primary], verify, choose_backup, changed, valid,
+                                    probe=lambda proxy: verify(proxy, reserve=False), activate=activate)
             self._failover_routes[owner] = (signature, gateway)
             return gateway.proxy
 
@@ -279,39 +304,54 @@ class ProxyManager:
             raise ValueError('A public VPN exit IP is required')
         return str(address)
 
-    def _claim_route(self, owner, endpoint, ip):
-        """Retain observed ownership, including closed profiles and old addresses."""
-        ip = self._public_ip(ip)
-        route = hashlib.sha256(json.dumps(endpoint, ensure_ascii=True).encode()).hexdigest()
+    @staticmethod
+    def _route_key(endpoint):
+        return hashlib.sha256(json.dumps(endpoint, ensure_ascii=True).encode()).hexdigest()
+
+    def _read_isolation_state(self):
+        """Read and validate history while the caller holds the isolation file lock."""
+        registry = self._isolation_root / '.network-isolation.json'
+        try:
+            state = json.loads(registry.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            state = {'version': 1, 'routes': {}, 'ips': {}}
+        except (OSError, ValueError) as exc:
+            raise ConnectionError('Не удалось прочитать историю изоляции VPN; запуск заблокирован.') from exc
+        try:
+            if (not isinstance(state, dict) or type(state.get('version')) is not int or
+                    state['version'] != 1 or not isinstance(state.get('routes'), dict) or
+                    not isinstance(state.get('ips'), dict)):
+                raise ValueError('Invalid network isolation registry')
+            for kind in ('routes', 'ips'):
+                for value, saved_owner in state[kind].items():
+                    if not isinstance(saved_owner, str) or not re.fullmatch(r'(?:profile:[a-z0-9 _-]+|slot:[0-9]+)', saved_owner):
+                        raise ValueError('Invalid network isolation owner')
+                    if kind == 'routes' and not re.fullmatch(r'[a-f0-9]{64}', value):
+                        raise ValueError('Invalid network isolation route')
+                    if kind == 'ips' and self._public_ip(value) != value:
+                        raise ValueError('Noncanonical network isolation IP')
+        except (TypeError, ValueError) as exc:
+            raise ConnectionError('История изоляции VPN повреждена; восстановите резервную копию.') from exc
+        return state
+
+    def _isolation_snapshot(self):
+        with self._lock, runtime_lock(str(self._isolation_root / '.network-isolation.lock')):
+            return self._read_isolation_state()
+
+    def _claim_route(self, owner, endpoint, ip=None, *, reserve=True):
+        """Reserve actual exits permanently; availability probes only read history."""
+        if reserve or ip is not None:
+            ip = self._public_ip(ip)
+        route = self._route_key(endpoint)
         registry = self._isolation_root / '.network-isolation.json'
         with self._lock, runtime_lock(str(self._isolation_root / '.network-isolation.lock')):
-            try:
-                state = json.loads(registry.read_text(encoding='utf-8'))
-            except FileNotFoundError:
-                state = {'version': 1, 'routes': {}, 'ips': {}}
-            except (OSError, ValueError) as exc:
-                raise ConnectionError('Не удалось прочитать историю изоляции VPN; запуск заблокирован.') from exc
-            try:
-                if (not isinstance(state, dict) or type(state.get('version')) is not int or
-                        state['version'] != 1 or not isinstance(state.get('routes'), dict) or
-                        not isinstance(state.get('ips'), dict)):
-                    raise ValueError('Invalid network isolation registry')
-                for kind in ('routes', 'ips'):
-                    for value, saved_owner in state[kind].items():
-                        if not isinstance(saved_owner, str) or not re.fullmatch(r'(?:profile:[a-z0-9 _-]+|slot:[0-9]+)', saved_owner):
-                            raise ValueError('Invalid network isolation owner')
-                        if kind == 'routes' and not re.fullmatch(r'[a-f0-9]{64}', value):
-                            raise ValueError('Invalid network isolation route')
-                        if kind == 'ips' and self._public_ip(value) != value:
-                            raise ValueError('Noncanonical network isolation IP')
-            except (TypeError, ValueError) as exc:
-                raise ConnectionError('История изоляции VPN повреждена; восстановите резервную копию.') from exc
-            for kind, value in (('routes', route), ('ips', ip)):
+            state = self._read_isolation_state()
+            for kind, value in [('routes', route)] + ([('ips', ip)] if ip is not None else []):
                 previous = state[kind].get(value)
                 if previous is not None and previous != owner:
                     reason = 'VPN-сервер' if kind == 'routes' else 'Внешний IP'
                     raise RouteConflictError(f'{reason} уже закреплён за другим профилем. Назначьте отдельный VPN-сервер.')
-            if state['routes'].get(route) != owner or state['ips'].get(ip) != owner:
+            if reserve and (state['routes'].get(route) != owner or state['ips'].get(ip) != owner):
                 state['routes'][route] = owner
                 state['ips'][ip] = owner
                 atomic_json(str(registry), state)
@@ -335,8 +375,6 @@ class ProxyManager:
                 health = set(vd.alive_indices) if vd._health_revision == vd._nodes_revision else None
             else:
                 index, health = None, None
-        if nodes and not self.ensure_core_running():
-            return 'ERROR_ALL_DOWN'
         with self._lock:
             selected = self._selected_routes.get(owner)
         NETWORK_LOG.info('VPN selection slot=%s servers=%s healthy=%s', slot_idx + 1, len(nodes),
@@ -351,6 +389,28 @@ class ProxyManager:
                 indices.sort(key=lambda candidate: candidate not in health)
         else:
             indices = [None]
+        state = self._isolation_snapshot()
+
+        def endpoint_for(candidate):
+            if candidate is None:
+                return ('happ', self.default_happ_proxy)
+            node = nodes[candidate]
+            return _node_endpoint(node)
+
+        available = [candidate for candidate in indices
+                     if state['routes'].get(self._route_key(endpoint_for(candidate)), owner) == owner]
+        occupied = len(indices) - len(available)
+        indices = available
+        # Reuse this profile's history after a restart before consuming new exits.
+        indices.sort(key=lambda candidate: state['routes'].get(self._route_key(endpoint_for(candidate))) != owner)
+        NETWORK_LOG.info('VPN pool slot=%s eligible=%s occupied=%s', slot_idx + 1, len(indices), occupied)
+        if not indices:
+            vd.last_error = (f'VPN-сервер уже закреплён за другим профилем. '
+                             f'Для слота #{slot_idx+1} нет свободных серверов: занято {occupied}. '
+                             'Добавьте отдельный VPN-сервер с другим внешним IP.')
+            raise RouteConflictError(vd.last_error)
+        if nodes and not self.ensure_core_running():
+            return 'ERROR_ALL_DOWN'
         first_conflict, last_error = None, ''
         for attempt, candidate in enumerate(indices, 1):
             if cancel_callback and cancel_callback():
@@ -362,10 +422,16 @@ class ProxyManager:
             else:
                 node = nodes[candidate]
                 proxy = primary if candidate == index else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + candidate}'
-                endpoint = (node.protocol, str(node.address).lower().rstrip('.'), int(node.port))
+                endpoint = _node_endpoint(node)
             if status_callback:
                 status_callback(f'Слот #{slot_idx+1}: проверка VPN {attempt}/{len(indices)}' +
+                                (f'; занято: {occupied}' if occupied else '') +
                                 ('; пробуем другой сервер…' if attempt > 1 else '…'))
+            try:
+                self._claim_route(owner, endpoint, reserve=False)
+            except RouteConflictError as exc:
+                first_conflict = first_conflict or exc
+                continue
             if not self.check_proxy_alive(proxy, timeout=6):
                 with self._lock:
                     last_error = self._proxy_errors.get(proxy, 'HTTPS через прокси не прошёл.')
@@ -389,6 +455,9 @@ class ProxyManager:
                 vd.last_error = ''
                 return proxy
         if first_conflict:
-            raise first_conflict
-        vd.last_error = f'Не найден рабочий VPN для слота #{slot_idx+1}; проверено серверов: {len(indices)}. {last_error}'
+            vd.last_error = (f'Нет свободного рабочего VPN для слота #{slot_idx+1}; '
+                             f'занято серверов: {occupied}, кандидатов: {len(indices)}. {first_conflict}')
+            raise RouteConflictError(vd.last_error)
+        vd.last_error = (f'Не найден рабочий VPN для слота #{slot_idx+1}; проверено серверов: {len(indices)}; '
+                         f'занято другими профилями: {occupied}. {last_error}')
         return 'ERROR_ALL_DOWN'

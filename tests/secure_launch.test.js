@@ -91,6 +91,7 @@ function webManager(launchSecure, secureRequest) {
     require: name => {
       if (name === './secure_launch') return { launchSecure, secureRequest };
       if (name === './manager_access') return require(path.join(root, 'manager_access'));
+      if (name === './app_paths') return require(path.join(root, 'app_paths'));
       if (name === 'crypto') return { randomBytes: () => Buffer.alloc(32, 1) };
       if (name === 'child_process') return { spawnSync: () => ({ stdout: 'DISPLAY;0;0;1920;1080;True' }) };
       if (name === 'http') return { createServer: callback => { handler = callback; return { listen() {}, address: () => ({ port: 54321 }) }; } };

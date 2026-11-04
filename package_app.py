@@ -1,13 +1,14 @@
 """Create a source distribution from an explicit allowlist, without user state."""
 import argparse
-import json
 from pathlib import Path
 import zipfile
 
 
 SOURCE_FILES = (
     'app_version.py', 'app_updater.py', 'app_update_ui.py',
-    'app_paths.py', 'portable_entry.py', 'portable_self_test.py',
+    'app_paths.py', 'app_paths.js', 'portable_entry.py', 'portable_self_test.py',
+    '.gitignore', '.gitattributes', '.githooks/pre-commit', '.githooks/pre-push',
+    'scripts/check_repository.py', 'tests/test_repository_privacy.py',
     'stealth_shield/manifest.json', 'stealth_shield/shield_engine.js',
     'app_container.py', 'browser_profiles.py', 'browser_focus.py', 'chrome_mobile.py', 'browser_lifecycle.py', 'chrome_transport.py',
     'gui_launcher.py', 'happ_memory.py', 'proxy_manager.py', 'proxy_network.py',
@@ -16,8 +17,9 @@ SOURCE_FILES = (
     'userscript_privacy.py', 'userscript_privacy.js', 'userscript_transform.js', 'mine_control_ui.py', 'account_loading_ui.py', 'embedded_login_ui.py',
     'vendor/acorn.js', 'vendor/acorn.LICENSE',
     'tests/test_userscripts.py', 'tests/userscript_runtime.test.js', 'tests/test_app_updater.py',
-    'tests/test_userscript_privacy.py', 'tests/userscript_transform.test.js', 'tests/test_mine_control.py', 'tests/test_account_loading.py', 'tests/test_embedded_login.py',
-    'tests/test_native_browser.py', 'tests/test_docked_browser.py', 'tests/test_gui_layout.py', 'tests/test_browser_focus.py', 'tests/test_vpn_lifecycle.py',
+    'tests/fixtures/mine-bot-v9.1.8.user.js', 'tests/test_data_paths.py', 'tests/app_paths.test.js',
+    'tests/test_userscript_privacy.py', 'tests/userscript_transform.test.js', 'tests/test_mine_control.py',
+    'tests/test_native_browser.py', 'tests/test_docked_browser.py', 'tests/test_gui_layout.py', 'tests/test_browser_focus.py', 'tests/test_vpn_lifecycle.py', 'tests/test_account_loading.py', 'tests/test_embedded_login.py',
     'server.js', 'secure_launch.js', 'manager_access.js', 'quick_launch.js',
     'public/index.html', 'public/app.js', 'public/style.css', 'README.md', 'package_app.py',
     'tests/test_vpn_safety.py', 'tests/test_vpn_failover.py', 'tests/test_network_mode.py', 'tests/test_subscription.py', 'tests/test_mobile_browser.py', 'tests/test_package_app.py', 'tests/test_browser_lifecycle.py', 'tests/test_chrome_transport.py',
@@ -45,8 +47,6 @@ def build_package(root, output):
         for name in SOURCE_FILES:
             source = development_readme if name == 'README.md' and development_readme.is_file() else root / name
             archive.write(source, name)
-        archive.writestr('vpn_config.json', json.dumps(dict(subscription_url='', raw_nodes_text='',
-                                                          last_updated='', active_mode='auto')))
     return output
 
 

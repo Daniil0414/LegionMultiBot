@@ -16,7 +16,7 @@ test('closing the last manager tab stops the server; reload and other tabs keep 
     process.argv.push('--open'); require('./server.js');`;
   const child = spawn(process.execPath, ['-e', script], {
     cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, LOCALAPPDATA: temporary, LEGION_MANAGER_PORT: '0' },
+    env: { ...process.env, LOCALAPPDATA: temporary, LEGION_DATA_DIR: path.join(temporary, 'state'), LEGION_MANAGER_PORT: '0' },
   });
   t.after(async () => {
     if (child.exitCode === null) { child.kill(); await once(child, 'exit'); }

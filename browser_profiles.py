@@ -13,6 +13,7 @@ from userscripts import UserscriptManager
 from vpn_runtime import atomic_json, process_identity, runtime_lock
 from chrome_mobile import MobileBrowser, device_for_profile
 from browser_lifecycle import close_abandoned_browser, process_exists
+from app_paths import profile_directory
 
 
 class LaunchCancelled(RuntimeError):
@@ -53,8 +54,7 @@ class BrowserProfiles:
     def __init__(self, root=None, source=None, userscripts=None, allow_direct=False, emulate_mobile=False):
         self.allow_direct = allow_direct
         self.emulate_mobile = bool(emulate_mobile)
-        local = Path(os.environ.get('LOCALAPPDATA', ''))
-        self.root = Path(root) if root else local / 'LegionMultiBot' / 'Bots'
+        self.root = Path(root) if root else profile_directory()
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._controllers = {}

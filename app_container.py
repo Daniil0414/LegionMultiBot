@@ -24,7 +24,7 @@ from proxy_manager import ProxyManager, ProxyEntry, parse_proxy_entry, ProxySele
 from proxy_network import fetch_proxy_ip
 from vpn_runtime import process_identity
 from app_update_ui import StartupUpdater
-from app_paths import APP_DIR, bundled_browser
+from app_paths import APP_DIR, DATA_DIR, bundled_browser
 
 CURRENT_DIR = str(APP_DIR)
 LAUNCH_LOG = logging.getLogger('legion.launch')
@@ -33,7 +33,7 @@ LAUNCH_LOG = logging.getLogger('legion.launch')
 def configure_launch_logging():
     if LAUNCH_LOG.handlers:
         return
-    directory = os.path.join(CURRENT_DIR, '.vpn_runtime')
+    directory = os.path.join(DATA_DIR, '.vpn_runtime')
     os.makedirs(directory, exist_ok=True)
     handler = RotatingFileHandler(os.path.join(directory, 'browser_launch.log'),
                                   maxBytes=1024 * 1024, backupCount=2, encoding='utf-8')
@@ -194,7 +194,7 @@ def get_system_monitors():
     return monitors if monitors else [{"x": 0, "y": 0, "width": 1920, "height": 1080, "primary": True}]
 
 # 4. Accounts Management (Clean standalone Bot Profiles)
-ACCOUNTS_FILE = os.path.join(CURRENT_DIR, "accounts.json")
+ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 
 def load_accounts():
     if not os.path.exists(ACCOUNTS_FILE):
@@ -231,6 +231,7 @@ def save_accounts(accounts):
                 "name": acc["name"],
                 "created_at": acc.get("created_at", "")
             })
+        os.makedirs(os.path.dirname(ACCOUNTS_FILE), exist_ok=True)
         with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
@@ -382,7 +383,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
         self.current_page = 1
 
         # Network & Proxy Manager (Happ + Multi-Port + Fallback)
-        self.proxy_manager = ProxyManager(CURRENT_DIR, start_monitor=self.use_vpn)
+        self.proxy_manager = ProxyManager(str(DATA_DIR), start_monitor=self.use_vpn)
         self.kill_switch_var = tk.BooleanVar(value=self.use_vpn)
         self.browser_profiles = BrowserProfiles(allow_direct=not self.use_vpn)
         self._closing_browsers = False
@@ -2204,7 +2205,6 @@ class HighQualityMultiBoxerApp(tk.Tk):
             task.set_exception(error)
         return task
 
-
     def _browser_hwnds_for_focus(self):
         handles = set(self.profile_hwnds.values())
         view = getattr(self, '_login_view', None)
@@ -2268,10 +2268,6 @@ class HighQualityMultiBoxerApp(tk.Tk):
             if hwnd and user32.IsWindow(hwnd):
                 user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
-    def _show_mine_control_after_game_open(self):
-        if not self._mine_auto_shown and not self._shutting_down:
-            self.open_mine_control()
-            self._mine_auto_shown = True
 
     def open_mine_control(self):
         if self._mine_overlay is None or not self._mine_overlay.winfo_exists():
@@ -2279,6 +2275,11 @@ class HighQualityMultiBoxerApp(tk.Tk):
                 account_names=lambda: {p['key']: p.get('gaia') or p.get('name') or p['key']
                                        for p in self.bot_profiles})
         self._mine_overlay.show()
+
+    def _show_mine_control_after_game_open(self):
+        if not self._mine_auto_shown and not self._shutting_down:
+            self.open_mine_control()
+            self._mine_auto_shown = True
 
     def open_userscript_dialog(self):
         try:

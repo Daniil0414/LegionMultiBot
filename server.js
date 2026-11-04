@@ -6,10 +6,11 @@ const { randomBytes } = require('crypto');
 const { allowManagerRequest } = require('./manager_access');
 const { launchSecure, secureRequest, closeSecure } = require('./secure_launch');
 const url = require('url');
+const { dataDirectory } = require('./app_paths');
 
 const PORT = Number(process.env.LEGION_MANAGER_PORT || 0);
 const MANAGER_TOKEN = randomBytes(32).toString('base64url');
-const CONFIG_FILE = path.join(__dirname, 'launcher_config.json');
+const CONFIG_FILE = path.join(dataDirectory(), 'launcher_config.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const AUTO_CLOSE = process.argv?.includes('--open') || false;
 const managerSessions = new Set();
@@ -72,6 +73,7 @@ function loadConfig() {
 
 function saveConfig(cfg) {
   try {
+    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
   } catch (e) {
     console.error('Error saving config:', e);

@@ -12,7 +12,7 @@ test('running manager rejects foreign origins and traversal, accepts its own tok
   const localData = fs.mkdtempSync(path.join(os.tmpdir(), 'legion-manager-test-'));
   const child = spawn(process.execPath, [path.join(root, 'server.js')], {
     cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, LOCALAPPDATA: localData, LEGION_MANAGER_PORT: '0' },
+    env: { ...process.env, LOCALAPPDATA: localData, LEGION_DATA_DIR: path.join(localData, 'state'), LEGION_MANAGER_PORT: '0' },
   });
   t.after(async () => {
     child.kill();

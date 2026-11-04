@@ -1,48 +1,61 @@
-# User data and local state
+# Personal state (development data must live outside this checkout)
 accounts.json
-userscript_config.json
-userscript_config.json.lock
-launcher_config.json
 vpn_config.json
+userscript_config.json*
+launcher_config.json
 proxies.txt
 .vpn_runtime/
-profiles/
 Bots/
+profiles/
 User Data/
-*.log
-*.lock
+stealth_shield/user_bot_script.js
+Cookies
+Cookies-journal
+Login Data*
+Web Data*
+History
+History-journal
+Local State
+Preferences
+*.db
+*.sqlite*
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.p12
 *.pfx
-**/Cookies
-**/Cookies-journal
-**/Login Data
-**/Web Data
-**/History
-**/Preferences
-**/Local State
-**/userscript-private.json
-**/.network-isolation.json
-**/.network-slots.json
-**/.legion-session.json
-# Development and build output
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-node_modules/
+
+# Generated builds, downloaded runtimes/extensions and local environments
 dist/
 build/
 build-cache/
-*.spec
+runtime/
+extensions/
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+*.lock
+!package-lock.json
 *.zip
-SHA256SUMS.txt
+*.7z
+*.rar
+*.exe
+*.dll
+*.tmp
+*.bak
+scratch_*
+/mine-bot.user.js
+/legion-mine-bot-*.txt
 .DS_Store
 Thumbs.db
-*$py.class
-.vpn_runtime/*
-!.vpn_runtime/.gitkeep
-stealth_shield/user_bot_script.js

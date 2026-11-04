@@ -1,3 +1,3 @@
 """Increase this version before publishing the next stable GitHub release."""
 
-APP_VERSION = '1.1.6'
+APP_VERSION = '1.1.7'

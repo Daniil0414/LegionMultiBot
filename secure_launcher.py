@@ -11,7 +11,7 @@ from browser_profiles import BrowserProfiles
 from proxy_manager import ProxyManager
 from vpn_runtime import process_identity
 
-BASE_DIR = Path(__file__).resolve().parent
+from app_paths import DATA_DIR
 
 
 def watch_parent(parent_pid):
@@ -66,7 +66,7 @@ def main():
     parent_pid = next((int(arg.split('=', 1)[1]) for arg in sys.argv[1:]
                        if arg.startswith('--parent-pid=')), None)
     parent_watch = watch_parent(parent_pid) if parent_pid else None
-    manager = ProxyManager(str(BASE_DIR))
+    manager = ProxyManager(str(DATA_DIR))
     profiles = BrowserProfiles()
     sessions = []
     wait_for_browsers = False

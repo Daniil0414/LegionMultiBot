@@ -55,12 +55,14 @@ class FailoverProxy:
     STANDBY_MAX_AGE = 15.0
     CONNECT_TIMEOUT = 2.0
 
-    def __init__(self, primary, ip, verify, choose_backup, on_change, valid=lambda: True):
+    def __init__(self, primary, ip, verify, choose_backup, on_change, valid=lambda: True, *, probe=None, activate=None):
         self._lock = threading.RLock()
         self._publish_lock = threading.Lock()
         self._closed = threading.Event()
         self._wake = threading.Event()
         self._verify = verify
+        self._probe = probe or verify
+        self._activate = activate or (lambda proxy, ip: None)
         self._choose_backup = choose_backup
         self._on_change = on_change
         self._valid = valid
@@ -94,8 +96,14 @@ class FailoverProxy:
             changed = bool(self._active and self._active.proxy == route.proxy)
             if changed:
                 standby = self._standby
-                self._active = (standby if standby and time.monotonic() - standby.checked_at <= self.STANDBY_MAX_AGE else None)
+                self._active = None
                 self._standby = None
+                if standby and time.monotonic() - standby.checked_at <= self.STANDBY_MAX_AGE:
+                    try:
+                        self._activate(standby.proxy, standby.ip)
+                        self._active = standby
+                    except Exception:
+                        self._failed_until[standby.proxy] = time.monotonic() + self.STANDBY_MAX_AGE
             elif self._standby and self._standby.proxy == route.proxy:
                 self._standby = None
             sockets = [pair for pair, upstream in self._tunnels.items() if upstream == route.proxy]
@@ -132,6 +140,7 @@ class FailoverProxy:
                         if self._closed.is_set():
                             return
                         if self._active is None:
+                            self._activate(route.proxy, route.ip)
                             self._active, changed = route, True
                         elif self._active.proxy != route.proxy:
                             self._standby = route
@@ -157,10 +166,11 @@ class FailoverProxy:
                 routes = [r for r in (self._active, self._standby) if r]
             def check(route):
                 try:
-                    ip = self._verify(route.proxy)
+                    ip = self._probe(route.proxy)
                     refreshed = Route(route.proxy, ip, time.monotonic())
                     with self._lock:
                         if self._active == route:
+                            self._activate(refreshed.proxy, refreshed.ip)
                             self._active = refreshed
                         elif self._standby == route:
                             self._standby = refreshed

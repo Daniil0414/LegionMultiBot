@@ -461,8 +461,10 @@ class VpnSafetyTests(unittest.TestCase):
         self.dispatcher.nodes += vpn.parse_raw_nodes('socks5://third.invalid:1080')
         manager._claim_route('profile:a', ('socks5', 'a.invalid', 1080), '8.8.8.8')
         with (patch.object(manager, 'ensure_core_running', return_value=True),
-              patch('proxy_manager.fetch_proxy_ip', side_effect=['8.8.8.8', '9.9.9.9', '1.1.1.1'])):
+              patch('proxy_manager.fetch_proxy_ip', side_effect=['8.8.8.8', '1.1.1.1']) as fetch):
             self.assertEqual(manager.get_working_proxy_for_slot(1, profile_key='b'), 'socks5://127.0.0.1:10812')
+        self.assertEqual([call.args[0] for call in fetch.call_args_list],
+                         ['socks5://127.0.0.1:10811', 'socks5://127.0.0.1:10812'])
         state = json.loads((manager._isolation_root / '.network-isolation.json').read_text())
         self.assertEqual(state['ips']['8.8.8.8'], 'profile:a')
         self.assertEqual(state['ips']['1.1.1.1'], 'profile:b')
@@ -529,7 +531,38 @@ class VpnSafetyTests(unittest.TestCase):
         with patch.object(manager, 'ensure_core_running', return_value=True), patch('proxy_manager.fetch_proxy_ip', side_effect=['8.8.8.8', '1.1.1.1']):
             manager.get_working_proxy_for_slot(0, profile_key='a')
             with self.assertRaisesRegex(ConnectionError, 'VPN-сервер уже закреплён'):
-                manager.get_working_proxy_for_slot(2, profile_key='b')
+                manager._claim_route('profile:b', ('socks5', 'a.invalid', 1080), '1.1.1.1')
+
+    def test_fully_reserved_pool_fails_without_any_network_probes(self):
+        manager = self.isolation_manager()
+        manager._claim_route('profile:a', ('socks5', 'a.invalid', 1080), '8.8.8.8')
+        manager._claim_route('profile:b', ('socks5', 'b.invalid', 1080), '1.1.1.1')
+        with (patch.object(manager, 'ensure_core_running', return_value=True) as core,
+              patch('proxy_manager.fetch_proxy_ip') as fetch):
+            with self.assertRaisesRegex(ConnectionError, 'нет свободных серверов: занято 2'):
+                manager.get_working_proxy_for_slot(5, profile_key='sixth')
+        fetch.assert_not_called()
+        core.assert_not_called()
+
+    def test_restart_reuses_owned_server_before_consuming_a_new_one(self):
+        manager = self.isolation_manager()
+        manager._claim_route('profile:a', ('socks5', 'b.invalid', 1080), '8.8.8.8')
+        with (patch.object(manager, 'ensure_core_running', return_value=True),
+              patch('proxy_manager.fetch_proxy_ip', return_value='8.8.8.8') as fetch):
+            self.assertEqual(manager.get_working_proxy_for_slot(0, profile_key='a'), 'socks5://127.0.0.1:10811')
+        fetch.assert_called_once_with('socks5://127.0.0.1:10811', timeout=6)
+
+    def test_reserved_servers_are_excluded_from_progress_and_failure_counts(self):
+        manager = self.isolation_manager()
+        manager._claim_route('profile:a', ('socks5', 'a.invalid', 1080), '8.8.8.8')
+        progress = []
+        with (patch.object(manager, 'ensure_core_running', return_value=True),
+              patch('proxy_manager.fetch_proxy_ip', side_effect=ConnectionError('fixture timeout')) as fetch):
+            self.assertEqual(manager.get_working_proxy_for_slot(5, profile_key='sixth', status_callback=progress.append), 'ERROR_ALL_DOWN')
+        fetch.assert_called_once_with('socks5://127.0.0.1:10815', timeout=6)
+        self.assertIn('проверка VPN 1/1', progress[0])
+        self.assertIn('занято другими профилями: 1', manager.vpn_dispatcher.last_error)
+        self.assertIn('fixture timeout', manager.vpn_dispatcher.last_error)
 
     def test_corrupt_isolation_history_blocks_without_overwriting(self):
         manager = self.isolation_manager()

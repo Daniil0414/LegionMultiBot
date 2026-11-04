@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +7,7 @@ from package_app import SOURCE_FILES, build_package
 
 
 class PackageTests(unittest.TestCase):
-    def test_distribution_ignores_private_state_and_generates_empty_vpn_template(self):
+    def test_distribution_contains_only_source_and_ignores_private_state(self):
         with tempfile.TemporaryDirectory(prefix='legion-package-test-') as directory:
             root = Path(directory)
             for name in SOURCE_FILES:
@@ -22,6 +21,5 @@ class PackageTests(unittest.TestCase):
                 path.write_text('PRIVATE_FIXTURE_VALUE', encoding='utf-8')
             output = build_package(root, root / 'release.zip')
             with zipfile.ZipFile(output) as archive:
-                self.assertEqual(set(archive.namelist()), set(SOURCE_FILES) | {'vpn_config.json'})
-                self.assertEqual(json.loads(archive.read('vpn_config.json'))['raw_nodes_text'], '')
+                self.assertEqual(set(archive.namelist()), set(SOURCE_FILES))
                 self.assertFalse(any(b'PRIVATE_FIXTURE_VALUE' in archive.read(name) for name in archive.namelist()))

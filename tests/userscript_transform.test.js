@@ -49,9 +49,9 @@ test('leaves strings, comments and normal game state intact', () => {
 });
 
 test('adaptation parses the complete checked-in bot', {
-  skip: !fs.existsSync(path.join(__dirname, '..', 'mine-bot.user.js')),
+  skip: !fs.existsSync(path.join(__dirname, 'fixtures', 'mine-bot-v9.1.8.user.js')),
 }, () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'mine-bot.user.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, 'fixtures', 'mine-bot-v9.1.8.user.js'), 'utf8');
   const result = transform(source);
   assert.ok(result.stats.globals > 300);
   assert.ok(result.stats.objectFlags > 15);
