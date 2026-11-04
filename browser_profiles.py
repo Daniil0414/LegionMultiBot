@@ -295,8 +295,13 @@ class BrowserProfiles:
                                            emulate_mobile=self.emulate_mobile)
                 controller.set_userscript(script)
                 try:
-                    stability_features = {'TreesInViz', 'TreeAnimationsInViz', 'AutofillServerCommunication'}
-                    stability_args = ['--disable-gpu-watchdog']
+                    stability_features = {'TreesInViz', 'TreeAnimationsInViz', 'AutofillServerCommunication', 'CalculateNativeWinOcclusion'}
+                    stability_args = [
+                        '--disable-gpu-watchdog',
+                        '--disable-background-timer-throttling',
+                        '--disable-backgrounding-occluded-windows',
+                        '--disable-renderer-backgrounding',
+                    ]
                     merged_cleaned = []
                     has_disable_features = False
                     for arg in cleaned:
@@ -305,7 +310,7 @@ class BrowserProfiles:
                             combined = existing | stability_features
                             merged_cleaned.append(f"--disable-features={','.join(sorted(combined))}")
                             has_disable_features = True
-                        else:
+                        elif arg not in stability_args:
                             merged_cleaned.append(arg)
                     if not has_disable_features:
                         merged_cleaned.append(f"--disable-features={','.join(sorted(stability_features))}")

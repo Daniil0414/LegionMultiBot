@@ -2250,8 +2250,11 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     "--no-pings",
                     "--no-first-run",
                     "--no-default-browser-check",
-                    "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication",
-                    "--disable-gpu-watchdog"
+                    "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication,CalculateNativeWinOcclusion",
+                    "--disable-gpu-watchdog",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding"
                 ]
                 if muted:
                     args.append("--mute-audio")
@@ -2774,9 +2777,17 @@ class HighQualityMultiBoxerApp(tk.Tk):
             "--disable-dev-shm-usage",
             "--disk-cache-size=10485760",
             "--media-cache-size=10485760",
-            "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication",
+            "--disable-features=TreesInViz,TreeAnimationsInViz,AutofillServerCommunication,CalculateNativeWinOcclusion",
             "--disable-gpu-watchdog",
         ]
+
+        anti_throttle = getattr(self, 'anti_throttle_var', None)
+        if anti_throttle is None or anti_throttle.get():
+            args.extend([
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ])
 
         if self.mute_var.get():
             args.append("--mute-audio")

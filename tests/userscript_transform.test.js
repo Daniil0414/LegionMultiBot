@@ -106,6 +106,61 @@ test('mine control supports compound toggle conditions like isPaused && !miningS
   assert.equal(page.readFixture().clicks, 2);
 });
 
+test('mine control supports async startBot with miningStartToken and helmet equip delay', () => {
+  let command;
+  const fixture = `(() => {
+    window.__mineBotRunning = true;
+    let isPaused = true, miningStartToken = null, clicks = 0;
+    const btn = {isConnected:true, textContent: 'Старт', click() {clicks++; this.onclick();}};
+    const st = {textContent: 'На паузе'};
+    async function startBot() {
+      if (!isPaused || miningStartToken) return;
+      const startToken = {};
+      miningStartToken = startToken;
+      btn.textContent = 'Пауза';
+      st.textContent = 'Надеваем каску с фонариком…';
+      await Promise.resolve();
+      if (miningStartToken !== startToken || !window.__mineBotRunning) return;
+      miningStartToken = null;
+      isPaused = false;
+      st.textContent = 'Работает';
+    }
+    function pauseBot() {
+      miningStartToken = null;
+      isPaused = true;
+      btn.textContent = 'Старт';
+      st.textContent = 'На паузе';
+    }
+    btn.onclick = () => { if (isPaused && !miningStartToken) { startBot(); } else { pauseBot(); } };
+    window.readFixture = () => ({isPaused, miningStartToken: Boolean(miningStartToken), clicks, btnText: btn.textContent, stText: st.textContent});
+    window.closeFixture = () => { window.__mineBotRunning = false; };
+  })();`;
+  const page = execute(fixture, {registerMineControl: handler => { command = handler; }});
+  assert.equal(command('status').state, 'paused');
+  assert.equal(page.readFixture().clicks, 0);
+
+  const startResult = command('start');
+  assert.equal(startResult.state, 'running');
+  assert.equal(startResult.changed, true);
+  assert.equal(page.readFixture().clicks, 1);
+  assert.equal(page.readFixture().btnText, 'Пауза');
+  assert.equal(page.readFixture().stText, 'Надеваем каску с фонариком…');
+
+  const secondStart = command('start');
+  assert.equal(secondStart.state, 'running');
+  assert.equal(secondStart.changed, false);
+  assert.equal(page.readFixture().clicks, 1);
+
+  assert.equal(command('status').state, 'running');
+
+  const pauseResult = command('pause');
+  assert.equal(pauseResult.state, 'paused');
+  assert.equal(pauseResult.changed, true);
+  assert.equal(page.readFixture().clicks, 2);
+  assert.equal(page.readFixture().btnText, 'Старт');
+  assert.equal(page.readFixture().stText, 'На паузе');
+});
+
 test('a changed toggle format keeps the script intact and leaves remote control unavailable', () => {
   const result = transform('window.__mineBotRunning = true; const btn = {}; btn.onclick = () => startBot();');
   assert.equal(result.stats.mineControls, 0);

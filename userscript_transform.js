@@ -47,11 +47,14 @@ function transform(source) {
       return `${emit(node.expression)};\n${name}.registerMineControl(action => {
         if (${name}.state(window).__mineBotRunning !== true || typeof isPaused !== 'boolean' ||
             !btn.isConnected || btn.disabled || typeof btn.onclick !== 'function') throw new Error('unavailable');
-        if (action === 'status') return {state: isPaused ? 'paused' : 'running', changed: false};
-        const paused = action === 'pause', previous = isPaused;
-        if (isPaused !== paused) btn.click();
-        if (isPaused !== paused) throw new Error('not_confirmed');
-        return {state: isPaused ? 'paused' : 'running', changed: previous !== isPaused};
+        const isRunning = () => !isPaused || Boolean(typeof miningStartToken !== 'undefined' && miningStartToken) || Boolean(btn && btn.textContent && btn.textContent.includes('Пауз'));
+        if (action === 'status') return {state: isRunning() ? 'running' : 'paused', changed: false};
+        const wantsRunning = action === 'start';
+        const previous = isRunning();
+        if (previous !== wantsRunning) btn.click();
+        const current = isRunning();
+        if (current !== wantsRunning) throw new Error('not_confirmed');
+        return {state: current ? 'running' : 'paused', changed: previous !== current};
       });`;
     }
     if (node.type === 'Literal' && node.value === 'lg-ghost-mode') return `${name}.ghostClass`;

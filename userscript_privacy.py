@@ -23,8 +23,13 @@ def private_key(key):
 
 
 def supported_bot(meta):
-    return any(value.rstrip('/') == 'https://github.com/Daniil0414/LegionAutoMiner'
-               for value in meta.get('namespace', []))
+    namespaces = [str(value).rstrip('/') for value in meta.get('namespace', [])]
+    names = [str(value).lower() for value in meta.get('name', [])]
+    return any(
+        ns in ('https://github.com/Daniil0414/LegionAutoMiner', 'http://github.com/Daniil0414/LegionAutoMiner')
+        or 'legionautominer' in ns.lower()
+        for ns in namespaces
+    ) or any('legionautominer' in n or 'шамиль клиент' in n or 'shamil' in n for n in names)
 
 
 @functools.lru_cache(maxsize=4)

@@ -109,6 +109,7 @@ class MineControlPanel(tk.Frame):
         self._layout_id = None
         if not self._visible:
             return
+        self.update_idletasks()
         host_w, host_h = self.master.winfo_width(), self.master.winfo_height()
         width = min(max(self._base_width, self.winfo_reqwidth()), host_w)
         height = min(self.winfo_reqheight(), host_h)
@@ -280,7 +281,7 @@ class MineControlPanel(tk.Frame):
                     self.submit('start', auto=True)
                 else:
                     if running:
-                        self.status.set(f"Рой активен: {len(running)} из {len(running)} окон копают. Автопроверка: раз в мин.")
+                        self.status.set(f"Рой активен: {len(running)} из {len(results)} окон копают. Автопроверка: раз в мин.")
                     self._schedule_periodic_check(15000 if has_not_ready else 60000)
                 continue
             self._busy = False

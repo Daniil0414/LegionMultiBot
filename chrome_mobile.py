@@ -483,39 +483,30 @@ class MobileBrowser:
     def navigate(self, url, new_window=False, desktop=False, target_id=None):
         pages = self.connection.call('Target.getTargets')['targetInfos']
         if not self.emulate_mobile and (target_id is None or new_window):
-            # Headless Chrome has no native-window metrics to preserve. Configure
-            # its blank page before navigating; browser-wide Fetch interception
-            # can strand headless startup on hosted Windows runners.
+            # Configure its blank page before navigating; avoids Fetch interception
+            # deadlocks on Document response stage and handles ERR_ABORTED retries.
             with self._open_lock:
-                gated, target = False, None
+                target = None
                 try:
-                    if self._headless:
-                        target = self.connection.call('Target.createTarget', dict(url='about:blank'))['targetId']
-                        session = self.wait_target(target)
-                        self._navigation_sessions.add(session)
-                        try:
+                    target_params = dict(url='about:blank')
+                    if not self._headless:
+                        target_params['newWindow'] = True
+                    target = self.connection.call('Target.createTarget', target_params)['targetId']
+                    session = self.wait_target(target)
+                    self._navigation_sessions.add(session)
+                    try:
+                        result = self.connection.call('Page.navigate', dict(url=url), session)
+                        if result.get('errorText') == 'net::ERR_ABORTED':
+                            self.connection.call('Page.stopLoading', {}, session)
                             result = self.connection.call('Page.navigate', dict(url=url), session)
-                            if result.get('errorText') == 'net::ERR_ABORTED':
-                                self.connection.call('Page.stopLoading', {}, session)
-                                result = self.connection.call('Page.navigate', dict(url=url), session)
-                            if result.get('errorText'):
-                                raise ProtocolError('Page.navigate: ' + result['errorText'])
-                        finally:
-                            self._navigation_sessions.discard(session)
-                    else:
-                        if self._userscript:
-                            self.connection.call('Fetch.enable', dict(patterns=[dict(
-                                urlPattern='*', resourceType='Document', requestStage='Response')]))
-                            gated = True
-                        target = self.connection.call('Target.createTarget', dict(url=url, newWindow=True))['targetId']
-                        self.wait_target(target)
+                        if result.get('errorText'):
+                            raise ProtocolError('Page.navigate: ' + result['errorText'])
+                    finally:
+                        self._navigation_sessions.discard(session)
                 except BaseException:
                     if target:
                         self._close_extra_target(target)
                     raise
-                finally:
-                    if gated:
-                        self.connection.call('Fetch.disable')
             first_window = self.app_mode and self.app_target is None
             if first_window:
                 self.app_target = target

@@ -37,20 +37,33 @@
   const EventClass = CustomEvent;
   let mineControl = null;
   const domMineControl = action => {
-    const btn = (shadow && shadowQuery(shadow, '#b-btn')) || nativeQuery('#b-btn') || (document.querySelector && document.querySelector('#b-btn'));
+    const btn = (shadow && shadowQuery(shadow, '#b-btn')) ||
+                (nativeGetId && nativeGetId('b-btn')) ||
+                nativeQuery('#b-btn') ||
+                (document.getElementById && document.getElementById('b-btn')) ||
+                (document.querySelector && document.querySelector('#b-btn'));
     if (!btn) throw new Error('unavailable');
-    const st = (shadow && shadowQuery(shadow, '#b-st')) || nativeQuery('#b-st') || (document.querySelector && document.querySelector('#b-st'));
-    const isPaused = st ? (st.textContent.includes('пауз') || !st.textContent.includes('работ'))
-                        : (btn.textContent.includes('Старт') || !btn.textContent.includes('Пауз'));
-    if (action === 'status') return { state: isPaused ? 'paused' : 'running', changed: false };
-    const wantsPause = action === 'pause';
-    const previous = isPaused;
-    if (isPaused !== wantsPause) {
+    const st = (shadow && shadowQuery(shadow, '#b-st')) ||
+               (nativeGetId && nativeGetId('b-st')) ||
+               nativeQuery('#b-st') ||
+               (document.getElementById && document.getElementById('b-st')) ||
+               (document.querySelector && document.querySelector('#b-st'));
+    const isRunning = () => {
+      const btnText = (btn.textContent || '').trim();
+      const stText = (st ? st.textContent || '' : '').trim();
+      if (btnText.includes('Пауз') || stText.includes('работ') || stText.includes('Надеваем') || stText.includes('каск')) return true;
+      if (btnText.includes('Старт') || stText.includes('пауз')) return false;
+      return false;
+    };
+    if (action === 'status') return { state: isRunning() ? 'running' : 'paused', changed: false };
+    const wantsRunning = action === 'start';
+    const previous = isRunning();
+    if (previous !== wantsRunning) {
       btn.click();
     }
-    const currentPaused = st ? (st.textContent.includes('пауз') || !st.textContent.includes('работ'))
-                             : (btn.textContent.includes('Старт') || !btn.textContent.includes('Пауз'));
-    return { state: currentPaused ? 'paused' : 'running', changed: previous !== currentPaused };
+    const current = isRunning();
+    if (current !== wantsRunning) throw new Error('not_confirmed');
+    return { state: current ? 'running' : 'paused', changed: previous !== current };
   };
   if (config.mineCommand && config.mineReply) listen(config.mineCommand, event => {
     if (typeof event.detail !== 'string' || event.detail.length > 1024) return;
