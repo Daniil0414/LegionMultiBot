@@ -58,7 +58,7 @@ class FailoverProxy:
     CHECK_INTERVAL = 6.0
     STANDBY_MAX_AGE = 45.0
     CONNECT_TIMEOUT = 2.0
-    MAX_PROBE_FAILURES = 2
+    MAX_PROBE_FAILURES = 3
 
     def __init__(self, primary, ip, verify, choose_backup, on_change, valid=lambda: True, *, probe=None, activate=None):
         self._lock = threading.RLock()

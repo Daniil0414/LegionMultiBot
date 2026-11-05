@@ -1394,7 +1394,7 @@ class VpnDispatcher:
         # A failed probe is temporary; saved credentials require explicit manual editing.
         return False, 'Автоматическое удаление отключено. Недоступные серверы сохранены для повторной проверки.'
 
-    def check_port_alive(self, port, timeout=2.5):
+    def check_port_alive(self, port, timeout=5.0):
         try:
             from proxy_network import fetch_proxy_ip
             fetch_proxy_ip(f'socks5://127.0.0.1:{port}', timeout=timeout)

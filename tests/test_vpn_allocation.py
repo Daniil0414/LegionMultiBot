@@ -346,3 +346,25 @@ class AllocationTests(unittest.TestCase):
         with patch('proxy_manager.fetch_proxy_ip', side_effect=fetch):
             self.assertEqual(self.manager.get_working_proxy_for_slot(0, profile_key='fallback'),
                              'socks5://127.0.0.1:10811')
+
+
+    def test_shared_failure_cache_lets_dead_windows_latch_onto_live_servers(self):
+        self.dispatcher.nodes += vpn.parse_raw_nodes('socks5://dead1.invalid:1080\nsocks5://dead2.invalid:1080')
+        self.claim('other_bot', 1)
+        alive_nodes = {'10810', '10811'}
+        def fetch(proxy, timeout=5.0):
+            if any(p in proxy for p in alive_nodes):
+                return '8.8.8.8'
+            raise ConnectionError('fixture dead node')
+        with patch('proxy_manager.fetch_proxy_ip', side_effect=fetch):
+            self.manager.get_resilient_proxy_for_slot(0, profile_key='failing_bot')
+            gateway = self.manager._failover_routes['profile:failing_bot'][1]
+            alive_nodes.remove('10810')
+            gateway._failed(gateway._active)
+            replacement = gateway._choose_backup({'socks5://127.0.0.1:10810'})
+            self.assertEqual(replacement[0], 'socks5://127.0.0.1:10811')
+            gateway._activate(replacement[0], replacement[1])
+            gateway._active = Route(*replacement, time.monotonic())
+        self.assertEqual(gateway.status['proxy'], 'socks5://127.0.0.1:10811')
+        state = self.manager._isolation_snapshot()
+        self.assertEqual(self.manager._route_load(state, 'profile:observer', _node_endpoint(self.dispatcher.nodes[1])), 2)

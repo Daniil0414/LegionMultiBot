@@ -10,7 +10,7 @@ NETWORK_LOG = logging.getLogger('legion.launch.network')
 NETWORK_LOG.addHandler(logging.NullHandler())
 
 
-def fetch_proxy_ip(proxy_url, timeout=2.5):
+def fetch_proxy_ip(proxy_url, timeout=5.0):
     parsed = urllib.parse.urlsplit(str(proxy_url))
     if parsed.scheme not in {'socks5', 'socks5h', 'http', 'https'} or not parsed.hostname:
         raise ValueError('An explicit SOCKS5 or HTTP proxy is required')

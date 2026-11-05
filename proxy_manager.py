@@ -81,6 +81,7 @@ class ProxyManager:
         self._lock = threading.RLock()
         self._route_ips = {}
         self._proxy_errors = {}
+        self._failed_routes = {}
         self._selected_routes = {}
         self._failover_routes = {}
         self._failover_status = {}
@@ -219,16 +220,19 @@ class ProxyManager:
 
         def activate(proxy, ip):
             with self._lock:
-                blocked = {item for item, until in failed_until.items() if until > time.monotonic()}
+                now = time.monotonic()
+                blocked = {item for item, until in failed_until.items() if until > now}
             gateway, rebalance = gateway_ref[0], False
             if gateway:
                 with gateway._lock:
                     rebalance = gateway._active is None
-                    blocked.update(item for item, until in gateway._failed_until.items() if until > time.monotonic())
+                    blocked.update(item for item, until in gateway._failed_until.items() if until > now)
             with self._lock, vd.lock:
                 alternatives = None
                 if rebalance:
                     blocked_routes = {self._route_key(endpoint_for(item)) for item in blocked}
+                    now = time.monotonic()
+                    blocked_routes.update(r for r, until in self._failed_routes.items() if until > now)
                     endpoints = [_node_endpoint(node) for node in vd.get_nodes_snapshot()] or [('happ', self.default_happ_proxy)]
                     candidates = [(i, endpoint) for i, endpoint in enumerate(endpoints)
                                   if self._route_key(endpoint) not in blocked_routes]
@@ -244,7 +248,7 @@ class ProxyManager:
             endpoint = endpoint_for(proxy)
             # Validate registry integrity without reserving capacity for a probe.
             self._claim_route(owner, endpoint, reserve=False)
-            ip = fetch_proxy_ip(proxy, timeout=2.5)
+            ip = fetch_proxy_ip(proxy, timeout=5.0)
             with self._lock, vd.lock:
                 if not valid():
                     raise ConnectionError('Назначение VPN изменилось; маршрут заблокирован.')
@@ -261,8 +265,18 @@ class ProxyManager:
                 healthy = set(vd.alive_indices) if vd._health_revision == vd._nodes_revision else None
             state = self._isolation_snapshot()
             excluded_routes = {self._route_key(endpoint_for(proxy)) for proxy in excluded}
+            now = time.monotonic()
+            with self._lock:
+                failed_routes = {r for r, until in self._failed_routes.items() if until > now}
             indices = list(range(len(nodes))) if nodes else [None]
+            def is_node_failed(i):
+                if i is None:
+                    ep = ('happ', self.default_happ_proxy)
+                else:
+                    ep = _node_endpoint(nodes[i])
+                return self._route_key(ep) in failed_routes
             indices.sort(key=lambda i: (
+                is_node_failed(i),
                 healthy is not None and i not in healthy,
                 self._route_load(state, owner, _node_endpoint(nodes[i]) if i is not None else ('happ', self.default_happ_proxy)),
                 i is not None and i < 48, i if i is not None else -1))
@@ -271,18 +285,21 @@ class ProxyManager:
             attempts = 0
             for index in indices:
                 proxy = self.default_happ_proxy if index is None else f'socks5://127.0.0.1:{BASE_LOCAL_PORT + index}'
+                route_key = self._route_key(endpoint_for(proxy))
                 with self._lock:
-                    cooling_down = failed_until.get(proxy, 0) > time.monotonic()
-                if (self._route_key(endpoint_for(proxy)) in excluded_routes or
-                        cooling_down):
+                    cooling_down = (failed_until.get(proxy, 0) > time.monotonic() or
+                                    self._failed_routes.get(route_key, 0) > time.monotonic())
+                if (route_key in excluded_routes or cooling_down):
                     continue
                 try:
                     # Probing a standby must not permanently consume its server/IP.
                     # Activation claims it atomically before any account traffic.
                     return proxy, verify(proxy, reserve=False)
                 except Exception:
+                    fail_until = time.monotonic() + FailoverProxy.STANDBY_MAX_AGE
                     with self._lock:
-                        failed_until[proxy] = time.monotonic() + FailoverProxy.STANDBY_MAX_AGE
+                        failed_until[proxy] = fail_until
+                        self._failed_routes[route_key] = fail_until
                     attempts += 1
                     if attempts >= 6:
                         break
@@ -303,6 +320,12 @@ class ProxyManager:
                 else:
                     self._route_ips.pop(proxy, None)
                     self._release_route(owner)
+                    if previous:
+                        try:
+                            prev_endpoint = endpoint_for(previous)
+                            self._failed_routes[self._route_key(prev_endpoint)] = time.monotonic() + FailoverProxy.STANDBY_MAX_AGE
+                        except Exception:
+                            pass
             if previous != status['proxy']:
                 NETWORK_LOG.info('VPN failover owner=%s gateway=%s upstream=%s previous=%s blocked=%s',
                                  owner, proxy, status['proxy'], previous, not bool(status['ip']))
