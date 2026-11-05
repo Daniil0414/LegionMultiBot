@@ -1,4 +1,4 @@
-"""Mine controls embedded in the multibot's grid, above its managed windows."""
+"""Mine controls embedded as an owned frameless overlay above the multibot's grid."""
 import logging
 import os
 import queue
@@ -11,10 +11,14 @@ from tkinter import ttk
 if os.name == 'nt':
     import ctypes
     from ctypes import wintypes
-    _redraw_window = ctypes.WinDLL('user32', use_last_error=True).RedrawWindow
-    _redraw_window.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT), wintypes.HRGN, wintypes.UINT]
-    _redraw_window.restype = wintypes.BOOL
-    RDW_INVALIDATE, RDW_ERASE, RDW_ALLCHILDREN = 0x0001, 0x0004, 0x0080
+    GA_ROOT = 2
+    GWLP_HWNDPARENT = -8
+    _get_ancestor = ctypes.windll.user32.GetAncestor
+    _get_ancestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    _get_ancestor.restype = wintypes.HWND
+    _set_window_long = getattr(ctypes.windll.user32, 'SetWindowLongPtrW', ctypes.windll.user32.SetWindowLongW)
+    _set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+    _set_window_long.restype = ctypes.c_void_p
 
 
 ERROR_TEXT = {
@@ -27,9 +31,13 @@ ERROR_TEXT = {
 DELAY_OPTIONS = {'0 сек': (0, 0), '1–5 сек': (1, 5), '1–10 сек': (1, 10)}
 
 
-class MineControlPanel(tk.Frame):
+class MineControlPanel(tk.Toplevel):
     def __init__(self, master, profiles, account_names=None):
-        super().__init__(master, bg='#111827', highlightbackground='#334155', highlightthickness=1)
+        super().__init__(master)
+        self.withdraw()
+        self.overrideredirect(True)
+        self.configure(bg='#111827', highlightbackground='#334155', highlightthickness=1)
+
         self.profiles = profiles
         self.account_names = account_names or (lambda: {})
         self._messages = queue.Queue()
@@ -40,12 +48,23 @@ class MineControlPanel(tk.Frame):
         self._periodic_timer = None
         self._poll_id = None
         self._layout_id = None
-        self._paint_id = None
-        self._damage = None
         self._visible = False
         self._position = (18, 18)
         self._drag_offset = None
-        self._host_binding = master.bind('<Configure>', self._host_resized, add='+')
+
+        top = master.winfo_toplevel()
+        self.transient(top)
+        if os.name == 'nt':
+            try:
+                root_hwnd = _get_ancestor(top.winfo_id(), GA_ROOT)
+                t_hwnd = _get_ancestor(self.winfo_id(), GA_ROOT)
+                if root_hwnd and t_hwnd:
+                    _set_window_long(t_hwnd, GWLP_HWNDPARENT, root_hwnd)
+            except Exception:
+                logging.getLogger('legion.launch').debug('Failed to configure Win32 owner for MineControlPanel')
+
+        self._host_binding = master.bind('<Configure>', self._on_container_configure, add='+')
+        self._top_binding = top.bind('<Configure>', self._on_container_configure, add='+') if top is not master else None
 
         self.header = tk.Frame(self, bg='#1e293b', cursor='fleur', padx=12, pady=6)
         self.header.pack(fill='x')
@@ -97,9 +116,25 @@ class MineControlPanel(tk.Frame):
         self.update_idletasks()
         self._base_width = self.winfo_reqwidth()
 
-    def _host_resized(self, event):
-        if event.widget is self.master:
-            self._queue_layout()
+    def winfo_x(self):
+        try:
+            return self.winfo_rootx() - self.master.winfo_rootx()
+        except Exception:
+            return self._position[0]
+
+    def winfo_y(self):
+        try:
+            return self.winfo_rooty() - self.master.winfo_rooty()
+        except Exception:
+            return self._position[1]
+
+    def _bounds(self):
+        x, y = self.winfo_x(), self.winfo_y()
+        return x, y, x + self.winfo_width(), y + self.winfo_height()
+
+    def _on_container_configure(self, event):
+        if event.widget in (self.master, self.master.winfo_toplevel()) and self._visible:
+            self._sync_position()
 
     def _queue_layout(self):
         if self._visible and self._layout_id is None:
@@ -107,84 +142,70 @@ class MineControlPanel(tk.Frame):
 
     def _layout(self):
         self._layout_id = None
-        if not self._visible:
+        if not self._visible or not self.winfo_exists():
             return
         self.update_idletasks()
-        host_w, host_h = self.master.winfo_width(), self.master.winfo_height()
-        width = min(max(self._base_width, self.winfo_reqwidth()), host_w)
-        height = min(self.winfo_reqheight(), host_h)
-        x = max(0, min(self._position[0], host_w - width))
-        y = max(0, min(self._position[1], host_h - height))
-        self._position = (x, y)
-        old = self._bounds() if self.winfo_ismapped() else None
-        self.place(x=x, y=y, width=width, height=height)
-        self.lift()
-        new = (x, y, x + width, y + height)
-        if old != new:
-            self._queue_repaint(old or new, new)
+        self._sync_position()
 
-    def _bounds(self):
-        x, y = self.winfo_x(), self.winfo_y()
-        return x, y, x + self.winfo_width(), y + self.winfo_height()
-
-    def _queue_repaint(self, old, new):
-        regions = [old, new] + ([self._damage] if self._damage else [])
-        self._damage = (min(r[0] for r in regions), min(r[1] for r in regions),
-                        max(r[2] for r in regions), max(r[3] for r in regions))
-        if self._paint_id is None:
-            # The place manager first commits the native move. Repair its exposed
-            # area in the next drawing idle, even while mouse messages stay busy.
-            self._paint_id = self.after_idle(self._repaint)
-
-    def _repaint(self):
-        self._paint_id = None
-        region, self._damage = self._damage, None
-        if region is None:
+    def _sync_position(self):
+        if not self._visible or not self.winfo_exists():
             return
         host = self.master
-        if os.name == 'nt':
-            native_rect = wintypes.RECT(*region)
-            # Invalidate foreign Chrome descendants too, without synchronously
-            # waiting on their UI threads. ALLCHILDREN crosses clipping layers.
-            _redraw_window(host.winfo_id(), ctypes.byref(native_rect), None,
-                           RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN)
-        hx, hy = host.winfo_rootx(), host.winfo_rooty()
+        try:
+            host_w, host_h = host.winfo_width(), host.winfo_height()
+            host_x, host_y = host.winfo_rootx(), host.winfo_rooty()
+        except tk.TclError:
+            return
 
-        def expose(widget):
-            if not widget.winfo_ismapped():
-                return
-            wx, wy = widget.winfo_rootx() - hx, widget.winfo_rooty() - hy
-            left, top = max(region[0], wx), max(region[1], wy)
-            right = min(region[2], wx + widget.winfo_width())
-            bottom = min(region[3], wy + widget.winfo_height())
-            if right <= left or bottom <= top:
-                return
-            # Tk ordinarily receives Expose through low-priority WM_PAINT.
-            # Deliver its normal paint event now; drawing remains in Tk's idle
-            # renderer. Walk Tk widgets only, never a foreign browser process.
-            widget.event_generate('<Expose>', x=left - wx, y=top - wy,
-                                  width=right - left, height=bottom - top, when='now')
-            for child in widget.winfo_children():
-                expose(child)
+        panel_w = max(self._base_width, self.winfo_reqwidth())
+        panel_h = self.winfo_reqheight()
 
-        expose(host)
+        if host_w > 0:
+            panel_w = min(panel_w, host_w)
+        if host_h > 0:
+            panel_h = min(panel_h, host_h)
+
+        max_x = max(0, host_w - panel_w)
+        max_y = max(0, host_h - panel_h)
+
+        rel_x = max(0, min(self._position[0], max_x))
+        rel_y = max(0, min(self._position[1], max_y))
+        self._position = (rel_x, rel_y)
+
+        self.geometry(f"{panel_w}x{panel_h}+{host_x + rel_x}+{host_y + rel_y}")
 
     def _start_drag(self, event):
         self._drag_offset = (event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty())
-        self.grab_set()
         return 'break'
 
     def _drag(self, event):
-        if self._drag_offset is not None:
-            self._position = (event.x_root - self.master.winfo_rootx() - self._drag_offset[0],
-                              event.y_root - self.master.winfo_rooty() - self._drag_offset[1])
-            self._queue_layout()
+        if self._drag_offset is not None and self._visible:
+            host = self.master
+            try:
+                host_w, host_h = host.winfo_width(), host.winfo_height()
+                host_x, host_y = host.winfo_rootx(), host.winfo_rooty()
+                panel_w, panel_h = self.winfo_width(), self.winfo_height()
+            except tk.TclError:
+                return 'break'
+
+            target_screen_x = event.x_root - self._drag_offset[0]
+            target_screen_y = event.y_root - self._drag_offset[1]
+
+            rel_x = target_screen_x - host_x
+            rel_y = target_screen_y - host_y
+
+            max_x = max(0, host_w - panel_w)
+            max_y = max(0, host_h - panel_h)
+
+            clamped_rel_x = max(0, min(rel_x, max_x))
+            clamped_rel_y = max(0, min(rel_y, max_y))
+
+            self._position = (clamped_rel_x, clamped_rel_y)
+            self.geometry(f"+{host_x + clamped_rel_x}+{host_y + clamped_rel_y}")
         return 'break'
 
     def _end_drag(self, event=None):
         self._drag_offset = None
-        if self.grab_current() is self:
-            self.grab_release()
         return 'break'
 
     def _set_action(self, action, enabled=True):
@@ -198,16 +219,15 @@ class MineControlPanel(tk.Frame):
 
     def show(self):
         self._visible = True
+        self.deiconify()
+        self.lift()
         self.update_idletasks()
-        self._layout()
+        self._sync_position()
 
     def hide(self):
-        old = self._bounds() if self.winfo_ismapped() else None
         self._visible = False
         self._end_drag()
-        self.place_forget()
-        if old is not None:
-            self._queue_repaint(old, old)
+        self.withdraw()
 
     def submit(self, action, auto=False):
         if action not in ('start', 'pause'):
@@ -364,25 +384,21 @@ class MineControlPanel(tk.Frame):
 
     def destroy(self):
         self._cancel_periodic_check()
-        old = self._bounds() if self.winfo_ismapped() else None
         self._end_drag()
-        self.master.unbind('<Configure>', self._host_binding)
+        try:
+            self.master.unbind('<Configure>', self._host_binding)
+        except Exception:
+            pass
+        if self._top_binding:
+            try:
+                self.master.winfo_toplevel().unbind('<Configure>', self._top_binding)
+            except Exception:
+                pass
         if self._layout_id is not None:
             self.after_cancel(self._layout_id)
             self._layout_id = None
         if self._poll_id is not None:
             self.after_cancel(self._poll_id)
             self._poll_id = None
-        if self._paint_id is not None:
-            self.after_cancel(self._paint_id)
-            self._paint_id = None
-        if old is not None:
-            self.place_forget()
-            if self._damage:
-                old = (min(old[0], self._damage[0]), min(old[1], self._damage[1]),
-                       max(old[2], self._damage[2]), max(old[3], self._damage[3]))
-            self._damage = old
-        if self._damage:
-            self._repaint()
         super().destroy()
         self.status = self.delay = None

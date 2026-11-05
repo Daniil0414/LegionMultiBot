@@ -368,3 +368,20 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(gateway.status['proxy'], 'socks5://127.0.0.1:10811')
         state = self.manager._isolation_snapshot()
         self.assertEqual(self.manager._route_load(state, 'profile:observer', _node_endpoint(self.dispatcher.nodes[1])), 2)
+
+    def test_mark_profile_route_failed_detaches_gateway_and_penalizes_node(self):
+        with patch('proxy_manager.fetch_proxy_ip', return_value='1.1.1.1'):
+            self.manager.get_resilient_proxy_for_slot(0, profile_key='bot_fail')
+            self.assertIn('profile:bot_fail', self.manager._failover_routes)
+            self.assertEqual(self.manager._selected_routes['profile:bot_fail'][1], 0)
+
+            self.manager.mark_profile_route_failed('bot_fail')
+            self.assertNotIn('profile:bot_fail', self.manager._failover_routes)
+
+            node0_ep = _node_endpoint(self.dispatcher.nodes[0])
+            route0_key = self.manager._route_key(node0_ep)
+            self.assertIn(route0_key, self.manager._failed_routes)
+            self.assertGreater(self.manager._failed_routes[route0_key], time.monotonic())
+
+            proxy2 = self.manager.get_working_proxy_for_slot(0, profile_key='bot_fail')
+            self.assertEqual(proxy2, 'socks5://127.0.0.1:10811')

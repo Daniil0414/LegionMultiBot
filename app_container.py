@@ -2727,6 +2727,17 @@ class HighQualityMultiBoxerApp(tk.Tk):
                 )
             self.update_slot_proxy_badge(slot_idx, 'ERROR_ALL_DOWN' if vpn else None)
 
+    @staticmethod
+    def _is_network_launch_error(exc):
+        if exc is None:
+            return False
+        msg = str(exc).lower()
+        if 'page.navigate' in msg or 'command timed out' in msg or 'net::err_' in msg:
+            return True
+        if 'connection refused' in msg or 'connection reset' in msg or 'timed out' in msg:
+            return True
+        return False
+
     def run_launch_single(self, key, slot_idx, proxy_slot_idx=None, target_url=None, generation=None):
         context = self.proxy_manager.profile_launch(key) if self.use_vpn else nullcontext()
         with context:
@@ -2744,24 +2755,6 @@ class HighQualityMultiBoxerApp(tk.Tk):
             existing.add(hwnd)
             return 1
         user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(cb_snap), 0)
-
-        connection = "Выбор рабочего VPN" if self.use_vpn else "Запуск без VPN"
-        self.after(0, lambda: self.status_lbl.config(text=f"🔍 Слот #{slot_idx+1}: {connection}..."))
-        try:
-            proxy_arg = self.get_launch_proxy(key, proxy_slot_idx)
-        except LaunchCancelled:
-            return False
-        except Exception as exc:
-            message = str(exc)
-            self.after(0, lambda idx=slot_idx, k=key, msg=message: self._mark_slot_browser_failed(idx, k, msg))
-            self.after(0, lambda msg=message: self.status_lbl.config(text=f'Слот #{slot_idx+1}: {msg}'))
-            return False
-        if not proxy_arg or proxy_arg == "ERROR_ALL_DOWN":
-            self.after(0, lambda idx=slot_idx, k=key: self._mark_slot_vpn_failed(idx, k))
-            self.after(0, lambda: self.status_lbl.config(text=f"🛑 Слот #{slot_idx+1}: ВПН не подключился"))
-            return False
-
-        self.after(0, lambda: self.update_slot_proxy_badge(slot_idx, proxy_arg))
 
         if target_url is None:
             cur_mode = self.slot_urls.get(key, "game")
@@ -2792,33 +2785,78 @@ class HighQualityMultiBoxerApp(tk.Tk):
         if self.mute_var.get():
             args.append("--mute-audio")
 
-        try:
-            self.after(0, lambda: self.status_lbl.config(text=f"Подготовка отдельного профиля: {key}..."))
-            session = self.browser_profiles.launch(CHROME_EXE, key, proxy_arg, args[1:], generation=generation)
-            if self.use_vpn:
-                self.proxy_manager.track_profile_process(key, session['identity'])
-            browser_pid = session['pid']
-            notice = self.userscript_launch_note()
-            if notice:
-                LAUNCH_LOG.warning('%s', notice)
-                self.after(0, lambda msg=notice: self.status_lbl.config(text=msg))
-            session['verified_ip'] = self.proxy_manager._route_ips.get(proxy_arg)
-            session['verified_at'] = time.monotonic()
-            # Set Chrome bot process to BELOW_NORMAL so 21 bots never lag the mouse or UI
+        max_attempts = 3 if self.use_vpn else 1
+        session = None
+        for attempt in range(max_attempts):
+            if self._closing_browsers or generation != self.browser_profiles.generation:
+                return False
+
+            connection = "Выбор рабочего VPN" if self.use_vpn else "Запуск без VPN"
+            if attempt > 0:
+                connection = f"Подбор другого VPN (попытка {attempt+1}/{max_attempts})"
+            self.after(0, lambda msg=connection: self.status_lbl.config(text=f"🔍 Слот #{slot_idx+1}: {msg}..."))
             try:
-                hProc = kernel32.OpenProcess(0x0200, False, browser_pid) # PROCESS_SET_INFORMATION
-                if hProc:
-                    kernel32.SetPriorityClass(hProc, 0x00004000) # BELOW_NORMAL_PRIORITY_CLASS
-                    kernel32.CloseHandle(hProc)
-            except Exception:
-                pass
-        except LaunchCancelled:
-            return False
-        except Exception as e:
-            LAUNCH_LOG.exception('Browser launch failed')
-            message = getattr(e, 'user_message', str(e))
-            self.after(0, lambda idx=slot_idx, k=key, msg=message: self._mark_slot_browser_failed(idx, k, msg))
-            self.after(0, lambda msg=message: self.status_lbl.config(text=f"Слот #{slot_idx+1}: {msg}"))
+                proxy_arg = self.get_launch_proxy(key, proxy_slot_idx)
+            except LaunchCancelled:
+                return False
+            except Exception as exc:
+                message = str(exc)
+                if attempt == max_attempts - 1:
+                    self.after(0, lambda idx=slot_idx, k=key, msg=message: self._mark_slot_browser_failed(idx, k, msg))
+                    self.after(0, lambda msg=message: self.status_lbl.config(text=f'Слот #{slot_idx+1}: {msg}'))
+                    return False
+                continue
+            if not proxy_arg or proxy_arg == "ERROR_ALL_DOWN":
+                if attempt == max_attempts - 1:
+                    self.after(0, lambda idx=slot_idx, k=key: self._mark_slot_vpn_failed(idx, k))
+                    self.after(0, lambda: self.status_lbl.config(text=f"🛑 Слот #{slot_idx+1}: ВПН не подключился"))
+                    return False
+                time.sleep(0.5)
+                continue
+
+            self.after(0, lambda p=proxy_arg: self.update_slot_proxy_badge(slot_idx, p))
+
+            try:
+                self.after(0, lambda: self.status_lbl.config(text=f"Подготовка отдельного профиля: {key}..."))
+                session = self.browser_profiles.launch(CHROME_EXE, key, proxy_arg, args[1:], generation=generation)
+                if self.use_vpn:
+                    self.proxy_manager.track_profile_process(key, session['identity'])
+                browser_pid = session['pid']
+                notice = self.userscript_launch_note()
+                if notice:
+                    LAUNCH_LOG.warning('%s', notice)
+                    self.after(0, lambda msg=notice: self.status_lbl.config(text=msg))
+                session['verified_ip'] = self.proxy_manager._route_ips.get(proxy_arg)
+                session['verified_at'] = time.monotonic()
+                # Set Chrome bot process to BELOW_NORMAL so 21 bots never lag the mouse or UI
+                try:
+                    hProc = kernel32.OpenProcess(0x0200, False, browser_pid) # PROCESS_SET_INFORMATION
+                    if hProc:
+                        kernel32.SetPriorityClass(hProc, 0x00004000) # BELOW_NORMAL_PRIORITY_CLASS
+                        kernel32.CloseHandle(hProc)
+                except Exception:
+                    pass
+                break
+            except LaunchCancelled:
+                return False
+            except Exception as e:
+                is_last = (attempt == max_attempts - 1)
+                is_net_error = self.use_vpn and self._is_network_launch_error(e)
+                if not is_last and is_net_error:
+                    LAUNCH_LOG.warning('Slot #%s (%s): network launch error (%s); retrying with another VPN route (%s/%s)',
+                                       slot_idx + 1, key, e, attempt + 2, max_attempts)
+                    if hasattr(self.proxy_manager, 'mark_profile_route_failed'):
+                        self.proxy_manager.mark_profile_route_failed(key)
+                    time.sleep(0.3)
+                    continue
+
+                LAUNCH_LOG.exception('Browser launch failed')
+                message = getattr(e, 'user_message', str(e))
+                self.after(0, lambda idx=slot_idx, k=key, msg=message: self._mark_slot_browser_failed(idx, k, msg))
+                self.after(0, lambda msg=message: self.status_lbl.config(text=f"Слот #{slot_idx+1}: {msg}"))
+                return False
+
+        if not session:
             return False
 
         new_hwnd = self.profile_hwnds.get(key) if session.get('reused_window') else None

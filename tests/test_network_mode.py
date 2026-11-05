@@ -125,6 +125,7 @@ class NetworkModeTests(unittest.TestCase):
         launcher = SimpleNamespace(use_vpn=False, _closing_browsers=False,
                                    browser_profiles=Mock(generation=0), proxy_manager=Mock(),
                                    bot_profiles=[dict(key='account', name='Account')],
+            current_page=1, page_size=16, dock_hwnd_to_slot=Mock(),
                                    status_lbl=Mock(), mute_var=Mock(), browser_sessions={},
                                    after=lambda delay, callback: callback(), slot_urls={},
                                    update_slot_proxy_badge=Mock())
@@ -185,3 +186,58 @@ class NetworkModeTests(unittest.TestCase):
                     self.assertIs(app.HighQualityMultiBoxerApp.choose_network_mode(root), expected)
                 finally:
                     root.destroy()
+
+    def test_run_launch_single_retries_on_network_error_and_marks_failed_route(self):
+        import chrome_mobile
+        launcher = SimpleNamespace(
+            use_vpn=True, _closing_browsers=False,
+            browser_profiles=Mock(generation=0), proxy_manager=Mock(),
+            bot_profiles=[dict(key='account', name='Account')],
+            current_page=1, page_size=16, dock_hwnd_to_slot=Mock(),
+            browser_sessions={}, profile_hwnds={}, slot_cards=[],
+            slot_urls={}, status_lbl=Mock(), mute_var=Mock(),
+            _vpn_failed_keys=set(), _launch_errors={},
+            after=lambda delay, callback: callback(),
+            userscript_launch_note=lambda: None,
+            update_slot_proxy_badge=Mock(),
+            _mark_slot_browser_failed=Mock(),
+            _show_mine_control_after_game_open=Mock(),
+            _is_network_launch_error=app.HighQualityMultiBoxerApp._is_network_launch_error,
+        )
+        launcher.mute_var.get.return_value = False
+        launcher._run_launch_single = lambda *args: app.HighQualityMultiBoxerApp._run_launch_single(launcher, *args)
+        launcher.get_launch_proxy = Mock(side_effect=['socks5://127.0.0.1:10836', 'socks5://127.0.0.1:10837'])
+
+        net_err = chrome_mobile.ProtocolError('Chrome command timed out: Page.navigate')
+        good_session = {'pid': 9999, 'identity': {'pid': 9999}, 'reused_window': True}
+        launcher.browser_profiles.launch.side_effect = [net_err, good_session]
+
+        with patch.object(app.user32, 'EnumWindows'), patch.object(app.user32, 'IsWindow', return_value=True):
+            launcher.profile_hwnds['account'] = 12345
+            result = launcher._run_launch_single('account', 0)
+
+        self.assertTrue(result)
+        self.assertEqual(launcher.get_launch_proxy.call_count, 2)
+        launcher.proxy_manager.mark_profile_route_failed.assert_called_once_with('account')
+        launcher._mark_slot_browser_failed.assert_not_called()
+
+    def test_pipe_connection_navigate_timeout_default_is_30(self):
+        import chrome_mobile
+        conn = chrome_mobile.PipeConnection.__new__(chrome_mobile.PipeConnection)
+        conn._lock = chrome_mobile.threading.Lock()
+        conn.closed = chrome_mobile.threading.Event()
+        conn._pending = {}
+        conn._next_id = 0
+        conn.writer = Mock()
+        conn.writer.write.side_effect = lambda data: len(data)
+
+        with patch.object(chrome_mobile.queue, 'Queue') as mock_queue:
+            q_inst = Mock()
+            q_inst.get.return_value = {'result': {}}
+            mock_queue.return_value = q_inst
+
+            conn.call('Page.navigate', {'url': 'https://test.invalid'})
+            q_inst.get.assert_called_with(timeout=30)
+
+            conn.call('Target.getTargets')
+            q_inst.get.assert_called_with(timeout=15)

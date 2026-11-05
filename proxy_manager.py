@@ -467,6 +467,39 @@ class ProxyManager:
         if gateway:
             gateway.close()
 
+    def mark_profile_route_failed(self, profile_key):
+        """Mark the active VPN route for this profile as temporarily failed and detach it."""
+        owner = f'profile:{profile_key.casefold()}' if isinstance(profile_key, str) else None
+        if not owner:
+            return
+        gateway_to_close = None
+        with self._lock:
+            selected = self._selected_routes.get(owner)
+            existing = self._detach_profile(owner)
+            if existing:
+                gateway_to_close = existing
+            vd = self.vpn_dispatcher
+            nodes = vd.get_nodes_snapshot()
+            node_idx = selected[1] if (selected and selected[1] is not None) else None
+            if node_idx is None and gateway_to_close and getattr(gateway_to_close, '_active', None):
+                active_proxy = gateway_to_close._active.proxy
+                if active_proxy and nodes:
+                    port = urllib.parse.urlsplit(active_proxy).port
+                    if port is not None:
+                        node_idx = (port - BASE_LOCAL_PORT) % len(nodes)
+            if node_idx is not None and nodes and 0 <= node_idx < len(nodes):
+                ep = _node_endpoint(nodes[node_idx])
+                route_key = self._route_key(ep)
+                cooldown = getattr(FailoverProxy, 'STANDBY_MAX_AGE', 45.0)
+                self._failed_routes[route_key] = time.monotonic() + cooldown
+                NETWORK_LOG.warning('Marked VPN route failed for %s: node=%s (%s)',
+                                    owner, node_idx, route_key)
+        if gateway_to_close:
+            try:
+                gateway_to_close.close()
+            except Exception:
+                pass
+
     @staticmethod
     def _process_current(identity):
         if not identity:
@@ -578,12 +611,16 @@ class ProxyManager:
         remaining = list(indices)
         checked = {}
         attempts, last_error = 0, ''
+        now = time.monotonic()
+        with self._lock:
+            failed_routes = {r for r, until in self._failed_routes.items() if until > now}
         while remaining:
             if self._closed.is_set() or (cancel_callback and cancel_callback()):
                 raise ProxySelectionCancelled('Запуск отменён')
             state = self._isolation_snapshot()
             assigned = state['profiles'].get(owner, {}).get('route')
             remaining.sort(key=lambda candidate: (
+                self._route_key(endpoint_for(candidate)) in failed_routes,
                 health is not None and candidate not in health,
                 self._route_load(state, owner, endpoint_for(candidate)),
                 self._route_key(endpoint_for(candidate)) != assigned,

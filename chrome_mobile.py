@@ -133,7 +133,9 @@ class PipeConnection:
     def send(self, method, params=None, session=None):
         return self._send(method, params, session, None)
 
-    def call(self, method, params=None, session=None, timeout=15):
+    def call(self, method, params=None, session=None, timeout=None):
+        if timeout is None:
+            timeout = 30 if method == 'Page.navigate' else 15
         pending = queue.Queue(maxsize=1)
         request_id = self._send(method, params, session, pending)
         try:

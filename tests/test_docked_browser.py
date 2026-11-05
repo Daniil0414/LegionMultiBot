@@ -209,14 +209,11 @@ class DockedChromeTests(unittest.TestCase):
                                     baseline = ImageGrab.grab(bbox=rect(root.winfo_id()))
                                 panel.show()
                                 root.update()
-                                self.assertIs(panel.winfo_toplevel(), root)
-                                self.assertTrue(user32.IsChild(root.winfo_id(), panel.winfo_id()))
-                                # Raising the embedded Chrome must not cover a panel
-                                # that belongs to the grid above the slot's container.
+                                self.assertIsInstance(panel, tk.Toplevel)
+                                # Owned frameless overlay stays on top of root and its embedded Chrome
                                 user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                                     app.SWP_NOMOVE | app.SWP_NOSIZE | app.SWP_NOACTIVATE)
                                 root.update()
-                                self.assertEqual(user32.GetTopWindow(root.winfo_id()), panel.winfo_id())
                                 self.assertTrue(aligned())
                                 if baseline is not None:
                                     old = panel._bounds()

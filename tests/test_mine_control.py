@@ -537,8 +537,8 @@ class OverlayMineTests(unittest.TestCase):
         try:
             panel.show()
             root.update()
-            self.assertIs(panel.winfo_toplevel(), root)
-            self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in root.winfo_children()))
+            self.assertIsInstance(panel, tk.Toplevel)
+            self.assertEqual(panel.master, host)
             local = panel.winfo_x(), panel.winfo_y()
             root.geometry('+160+130')
             root.update()
