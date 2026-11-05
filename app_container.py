@@ -637,7 +637,7 @@ class HighQualityMultiBoxerApp(tk.Tk):
                     return key, session, fetch_proxy_ip(session['proxy'])
                 except Exception:
                     return key, session, None
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=8) as pool:
                 results = list(pool.map(probe, stale))
 
             def finish():
