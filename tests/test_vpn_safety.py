@@ -78,6 +78,81 @@ class VpnSafetyTests(unittest.TestCase):
         self.assertEqual(d.config, original)
         self.assertEqual(len(d.nodes), 2)
 
+    def test_purge_dead_nodes_removes_unresponsive_servers_and_keeps_working_ones(self):
+        d = self.dispatcher
+        process = Process()
+        checked_ports = []
+        def check_port(port, timeout=5.0):
+            checked_ports.append(port)
+            return len(checked_ports) == 1
+        with patch.object(d, '_spawn', return_value=process), patch.object(d, 'check_port_alive', side_effect=check_port), patch.object(d, 'start_xray', return_value=True):
+            ok, msg = d.purge_dead_nodes()
+            self.assertTrue(ok)
+            self.assertIn('Удалено нерабочих серверов: 1', msg)
+            self.assertIn('осталось рабочих: 1', msg)
+        self.assertEqual(len(d.nodes), 1)
+        self.assertEqual(len(d.alive_nodes), 1)
+        self.assertEqual(d.alive_indices, {0})
+        self.assertIn('a.invalid', d.nodes[0].tag)
+
+    def test_apply_nodes_with_prune_dead_automatically_removes_dead_servers(self):
+        d = self.dispatcher
+        process = Process()
+        raw = 'socks5://alive1.invalid:1080\nsocks5://dead.invalid:1080\nsocks5://alive2.invalid:1080'
+        checked_ports = []
+        def check_port(port, timeout=5.0):
+            checked_ports.append(port)
+            return len(checked_ports) in (1, 3)
+        with patch.object(d, '_spawn', return_value=process), patch.object(d, 'check_port_alive', side_effect=check_port), patch.object(d, 'start_xray', return_value=True):
+            ok, msg = d.set_custom_nodes_text(raw, prune_dead=True)
+            self.assertTrue(ok)
+            self.assertIn('автоматически удалено нерабочих: 1', msg)
+            self.assertEqual(len(d.nodes), 2)
+            self.assertEqual(len(d.alive_nodes), 2)
+            self.assertIn('alive1.invalid', d.nodes[0].tag)
+            self.assertIn('alive2.invalid', d.nodes[1].tag)
+
+    def test_purge_dead_nodes_reports_no_change_when_all_servers_are_alive(self):
+        d = self.dispatcher
+        process = Process()
+        with patch.object(d, '_spawn', return_value=process), patch.object(d, 'check_port_alive', return_value=True), patch.object(d, 'start_xray', return_value=True):
+            ok, msg = d.purge_dead_nodes()
+            self.assertTrue(ok)
+            self.assertIn('Все серверы (2) доступны', msg)
+            self.assertEqual(len(d.nodes), 2)
+
+    def test_apply_nodes_with_prune_dead_preserves_all_nodes_when_none_answer(self):
+        d = self.dispatcher
+        process = Process()
+        raw = 'socks5://a.invalid:1080\nsocks5://b.invalid:1080'
+        with patch.object(d, '_spawn', return_value=process), patch.object(d, 'check_port_alive', return_value=False), patch.object(d, 'start_xray', return_value=True):
+            ok, msg = d.set_custom_nodes_text(raw, prune_dead=True)
+            self.assertTrue(ok)
+            self.assertIn('Серверы сохранены', msg)
+            self.assertEqual(len(d.nodes), 2)
+
+    def test_purge_dead_nodes_aborts_without_changes_when_none_answer(self):
+        d = self.dispatcher
+        process = Process()
+        original_nodes = list(d.nodes)
+        with patch.object(d, '_spawn', return_value=process), patch.object(d, 'check_port_alive', return_value=False):
+            ok, msg = d.purge_dead_nodes()
+            self.assertFalse(ok)
+            self.assertIn('Ни один сервер не ответил', msg)
+            self.assertEqual(d.nodes, original_nodes)
+
+    def test_reset_routing_state_clears_failures_and_errors(self):
+        mgr = ProxyManager(base_dir=self.temp.name, start_monitor=False)
+        mgr._failed_routes['route1'] = 999999.0
+        mgr._proxy_errors['proxy1'] = 'test error'
+        mgr._selected_routes['owner1'] = ('sig', 0)
+        mgr._failover_status['proxy1'] = {'ip': '1.1.1.1'}
+        mgr.reset_routing_state()
+        self.assertEqual(mgr._failed_routes, {})
+        self.assertEqual(mgr._proxy_errors, {})
+        self.assertEqual(mgr._selected_routes, {})
+        self.assertEqual(mgr._failover_status, {})
+
     def test_probe_uses_other_ports_and_preserves_live_routes(self):
         d = self.dispatcher
         before = d.generate_xray_config()

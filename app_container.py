@@ -1319,22 +1319,30 @@ class HighQualityMultiBoxerApp(tk.Tk):
                 return
             self._network_settings_busy = True
             source_url = getattr(self, '_pending_subscription_url', None)
+            self.happ_status_var.set("🔍 Проверка и автоудаление нерабочих серверов...")
+            def _progress(m):
+                def _show():
+                    if dlg.winfo_exists():
+                        self.happ_status_var.set(m)
+                self.after(0, _show)
             def _worker():
                 try:
                     if source_url:
-                        ok, msg = vd.set_custom_nodes_text(txt, source_url=source_url)
+                        ok, msg = vd.set_custom_nodes_text(txt, source_url=source_url, progress_callback=_progress)
                     else:
-                        ok, msg = vd.set_custom_nodes_text(txt)
-                except Exception:
-                    ok, msg = False, 'Не удалось применить серверы. Проверьте настройки Xray и повторите.'
+                        ok, msg = vd.set_custom_nodes_text(txt, progress_callback=_progress)
+                except Exception as exc:
+                    ok, msg = False, f'Не удалось применить серверы: {exc}'
                 def _done():
                     self._network_settings_busy = False
                     try:
+                        if hasattr(self.proxy_manager, 'reset_routing_state'):
+                            self.proxy_manager.reset_routing_state()
+                        self.periodic_vpn_check(schedule_next=False)
+                        self.update_all_slot_proxy_badges()
                         if not dlg.winfo_exists():
                             return
                         _refresh_pool_display()
-                        self.periodic_vpn_check(schedule_next=False)
-                        self.update_all_slot_proxy_badges()
                         if ok:
                             self._pending_happ_json = None
                             self._pending_subscription_url = None
@@ -1451,6 +1459,53 @@ class HighQualityMultiBoxerApp(tk.Tk):
             self.update_all_slot_proxy_badges()
             messagebox.showinfo("Готово", msg, parent=dlg)
 
+        def _prune_dead_nodes_action():
+            if self._happ_import_busy or getattr(self, '_network_settings_busy', False):
+                return
+            if self.has_live_browser_sessions():
+                messagebox.showwarning("Внимание", "Для удаления нерабочих серверов сначала закройте окна ботов.", parent=dlg)
+                return
+            if not vd.nodes:
+                messagebox.showinfo("Серверы", "Пул серверов пуст.", parent=dlg)
+                return
+            if not messagebox.askyesno("Удаление нерабочих серверов",
+                                       "Проверить все серверы и удалить из пула не отвечающие?\n\n"
+                                       "Рабочие серверы останутся в пуле.", parent=dlg):
+                return
+            self._network_settings_busy = True
+            pool_text.delete("1.0", tk.END)
+            pool_text.insert(tk.END, "🔍 Проверка и автоудаление нерабочих серверов...\n")
+            def _worker():
+                try:
+                    def _progress_prune(m):
+                        def _show():
+                            if dlg.winfo_exists() and pool_text.winfo_exists():
+                                pool_text.insert(tk.END, m + "\n")
+                                pool_text.see(tk.END)
+                        self.after(0, _show)
+                    ok, msg = vd.purge_dead_nodes(progress_callback=_progress_prune)
+                except Exception as exc:
+                    ok, msg = False, f"Ошибка при удалении серверов: {exc}"
+                def _done():
+                    self._network_settings_busy = False
+                    try:
+                        if hasattr(self.proxy_manager, 'reset_routing_state'):
+                            self.proxy_manager.reset_routing_state()
+                        self.periodic_vpn_check(schedule_next=False)
+                        self.update_all_slot_proxy_badges()
+                        if not dlg.winfo_exists():
+                            return
+                        _refresh_happ_dialog()
+                        if ok:
+                            messagebox.showinfo("Готово", msg, parent=dlg)
+                        else:
+                            messagebox.showwarning("Результат", msg, parent=dlg)
+                    except Exception:
+                        pass
+                self.after(0, _done)
+            threading.Thread(target=_worker, daemon=True).start()
+
+        tk.Button(pool_btn_row, text="🧹 Удалить нерабочие", command=_prune_dead_nodes_action, bg="#d97706", fg="#ffffff", activebackground="#b45309", activeforeground="#ffffff", font=("Segoe UI", 8, "bold"), relief="flat", padx=8, pady=2, cursor="hand2").pack(side="left", padx=(0, 6))
         tk.Button(pool_btn_row, text="🔄 Перезапустить ядро Xray", command=_restart_xray_action, bg="#7c3aed", fg="#ffffff", font=("Segoe UI", 8, "bold"), relief="flat", padx=8, pady=2, cursor="hand2").pack(side="left", padx=(0, 6))
         tk.Button(pool_btn_row, text="🗑️ Удалить все сервера", command=_clear_all_servers_action, bg="#dc2626", fg="#ffffff", activebackground="#991b1b", activeforeground="#ffffff", font=("Segoe UI", 8, "bold"), relief="flat", padx=8, pady=2, cursor="hand2").pack(side="left")
 

@@ -570,6 +570,13 @@ class ProxyManager:
         if error:
             raise error
 
+    def reset_routing_state(self):
+        with self._lock:
+            self._failed_routes.clear()
+            self._proxy_errors.clear()
+            self._selected_routes.clear()
+            self._failover_status.clear()
+
     def get_working_proxy_for_slot(self, slot_idx, status_callback=None, profile_key=None, cancel_callback=None):
         if type(slot_idx) is not int or slot_idx < 0:
             raise ValueError('Invalid proxy slot index')

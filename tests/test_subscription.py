@@ -410,8 +410,8 @@ class SubscriptionSettingsTests(unittest.TestCase):
               patch.object(self.root, 'after', side_effect=lambda delay, callback: callback()),
               patch.object(self.app.messagebox, 'showinfo')):
             apply.invoke()
-        self.assertEqual(self.dispatcher.set_custom_nodes_text.call_args.kwargs,
-                         {'source_url': 'https://example.invalid/saved'})
+        self.assertEqual(self.dispatcher.set_custom_nodes_text.call_args.kwargs.get('source_url'),
+                         'https://example.invalid/saved')
         self.assertIsNone(self.root._pending_subscription_url)
         self.assertFalse(self.root._happ_settings_dialog.winfo_exists())
 
@@ -442,7 +442,7 @@ class SubscriptionSettingsTests(unittest.TestCase):
               patch.object(self.root, 'after', side_effect=lambda delay, callback: callback()),
               patch.object(self.app.messagebox, 'showinfo')):
             apply.invoke()
-        self.dispatcher.set_custom_nodes_text.assert_called_once_with('socks5://apply-fixture.invalid:1080')
+        self.assertEqual(self.dispatcher.set_custom_nodes_text.call_args.args, ('socks5://apply-fixture.invalid:1080',))
         self.assertFalse(self.root._happ_settings_dialog.winfo_exists())
 
     def test_close_settings_keeps_staged_json_without_implicitly_applying_it(self):

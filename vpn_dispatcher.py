@@ -917,7 +917,7 @@ class VpnDispatcher:
         with self.lock:
             atomic_json(CONFIG_FILE, self.config)
 
-    def _apply_nodes(self, nodes, raw_text, subscription_url=None):
+    def _apply_nodes(self, nodes, raw_text, subscription_url=None, prune_dead=False, progress_callback=None):
         with self.lock:
             old = (self.nodes, self.alive_nodes, self.alive_indices, self.config,
                    self._health_revision, self._health_checked_at, self._nodes_revision)
@@ -941,9 +941,34 @@ class VpnDispatcher:
                                    self._active_fingerprint != self._fingerprint(self.generate_xray_config())):
                     self.start_xray()
                 return False, f'Настройки не применены: {exc}'
+
+        if prune_dead and nodes and self.xray_bin:
+            alive_count, total_count = self.filter_alive_nodes(timeout=4.0, max_workers=16,
+                                                               progress_callback=progress_callback)
+            if 0 < alive_count < total_count:
+                dead_count = total_count - alive_count
+                with self.lock:
+                    surviving = list(self.alive_nodes)
+                    self.nodes = surviving
+                    self.alive_indices = set(range(len(surviving)))
+                    self._nodes_revision += 1
+                    self._health_revision = self._nodes_revision
+                    pruned_raw = json.dumps([{'remarks': n.tag, 'outbounds': [n.outbound_config]}
+                                             for n in surviving], ensure_ascii=False, indent=2)
+                    self.config = dict(self.config, raw_nodes_text=pruned_raw,
+                                       last_updated=time.strftime('%Y-%m-%d %H:%M:%S'))
+                    if not self.start_xray():
+                        return False, f'Не удалось запустить Xray с отфильтрованными серверами: {self.last_error or "ошибка запуска"}'
+                    self.save_config()
+                return True, f'Применено рабочих серверов: {alive_count} (автоматически удалено нерабочих: {dead_count}).'
+            elif alive_count == total_count and total_count > 0:
+                return True, f'Применено серверов: {alive_count}. Все серверы доступны.'
+            elif alive_count == 0:
+                return True, f'Применено серверов: {total_count}. Серверы сохранены (проверка доступности не ответила).'
+
         return True, f'Применено серверов: {len(nodes)}. Проверка доступности не удаляет ключи.'
 
-    def set_custom_nodes_text(self, text, source_url=None):
+    def set_custom_nodes_text(self, text, source_url=None, prune_dead=True, progress_callback=None):
         try:
             parsed = parse_subscription_nodes(text)
         except SubscriptionError as exc:
@@ -955,7 +980,8 @@ class VpnDispatcher:
                 source_url = subscription_url(source_url)
             except ValueError:
                 return False, 'Не удалось сохранить некорректную ссылку подписки.'
-        return self._apply_nodes(parsed, text, subscription_url=source_url)
+        return self._apply_nodes(parsed, text, subscription_url=source_url,
+                                 prune_dead=prune_dead, progress_callback=progress_callback)
 
     def open_subscription_in_happ(self, value):
         """Let the installed Happ handle its subscription and existing device identity."""
@@ -1390,9 +1416,36 @@ class VpnDispatcher:
                         except OSError:
                             pass
 
-    def purge_dead_nodes(self):
-        # A failed probe is temporary; saved credentials require explicit manual editing.
-        return False, 'Автоматическое удаление отключено. Недоступные серверы сохранены для повторной проверки.'
+    def purge_dead_nodes(self, progress_callback=None):
+        with self.lock:
+            nodes = list(self.nodes)
+        if not nodes:
+            return False, 'Список серверов пуст.'
+        if not self.xray_bin:
+            return False, 'Исполняемый файл Xray не найден.'
+
+        alive_count, total_count = self.filter_alive_nodes(timeout=4.0, max_workers=16,
+                                                           progress_callback=progress_callback)
+        if alive_count == 0:
+            return False, 'Ни один сервер не ответил на проверку доступности. Удаление отменено во избежание потери данных.'
+        if alive_count == total_count:
+            return True, f'Все серверы ({total_count}) доступны. Нерабочих нод не обнаружено.'
+
+        dead_count = total_count - alive_count
+        with self.lock:
+            surviving = list(self.alive_nodes)
+            self.nodes = surviving
+            self.alive_indices = set(range(len(surviving)))
+            self._nodes_revision += 1
+            self._health_revision = self._nodes_revision
+            pruned_raw = json.dumps([{'remarks': n.tag, 'outbounds': [n.outbound_config]}
+                                     for n in surviving], ensure_ascii=False, indent=2)
+            self.config = dict(self.config, raw_nodes_text=pruned_raw,
+                               last_updated=time.strftime('%Y-%m-%d %H:%M:%S'))
+            if not self.start_xray():
+                return False, 'Не удалось перезапустить ядро после удаления серверов.'
+            self.save_config()
+        return True, f'Удалено нерабочих серверов: {dead_count}. В пуле осталось рабочих: {alive_count}.'
 
     def check_port_alive(self, port, timeout=5.0):
         try:
